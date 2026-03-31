@@ -21,10 +21,19 @@ npm install
 - `OPENCODE_SERVE_PORT`: OpenCode serve 端口（默认 `4096`）
 - `OPENCODE_SERVER_PASSWORD`: OpenCode serve 密码（可留空，进程启动时会自动生成随机值）
 
-## 3. 本地运行
+## 3. 运行方式
+
+开发模式（热启动，直接跑 TS）：
 
 ```bash
 npm run dev
+```
+
+生产模式（先编译再启动）：
+
+```bash
+npm run build
+npm start
 ```
 
 看到 `飞书长连接已启动，等待消息...` 后：
