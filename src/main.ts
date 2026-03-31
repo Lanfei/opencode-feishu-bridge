@@ -1,7 +1,7 @@
 import * as Lark from "@larksuiteoapi/node-sdk";
 import { randomBytes } from "node:crypto";
 import { config, persistAllowedOpenId } from "./config";
-import { askOpenCode, initOpenCodeServe, stopOpenCodeServe } from "./opencode";
+import { askOpenCode, initOpenCodeServe, OpenCodeEvent, stopOpenCodeServe } from "./opencode";
 
 const client = new Lark.Client({
   appId: config.appId,
@@ -32,7 +32,7 @@ function enqueueUserMessage(openId: string, task: () => Promise<void>): void {
   queuedMessageCount.set(openId, nextCount);
 
   if (nextCount > 1) {
-    console.log(`[queue] open_id=${openId} queued=${nextCount}`);
+    console.log(`[queue]: open_id=${openId} queued=${nextCount}`);
   }
 
   const current = previous
@@ -94,8 +94,22 @@ function getOrCreatePendingToken(openId: string): { token: string; expiresAt: nu
   return created;
 }
 
-async function replyText(chatId: string, text: string): Promise<void> {
-  await client.im.v1.message.create({
+async function replyText(chatId: string, text: string, replyToMessageId?: string): Promise<string | undefined> {
+  if (replyToMessageId) {
+    const result = await client.im.v1.message.reply({
+      path: {
+        message_id: replyToMessageId
+      },
+      data: {
+        msg_type: "text",
+        content: JSON.stringify({ text })
+      }
+    });
+
+    return result.data?.message_id;
+  }
+
+  const result = await client.im.v1.message.create({
     params: {
       receive_id_type: "chat_id"
     },
@@ -105,55 +119,353 @@ async function replyText(chatId: string, text: string): Promise<void> {
       content: JSON.stringify({ text })
     }
   });
+
+  return result.data?.message_id;
 }
 
-async function safeReplyText(chatId: string, text: string, context: string): Promise<void> {
+async function safeReplyText(
+  chatId: string,
+  text: string,
+  context: string,
+  replyToMessageId?: string,
+  eventId?: string,
+  logSuccess = false,
+  openId?: string
+): Promise<string | undefined> {
   try {
-    await replyText(chatId, text);
+    const messageId = await replyText(chatId, text, replyToMessageId);
+    return messageId;
   } catch (error) {
-    console.error(`[reply] 发送失败 context=${context} chat_id=${chatId}`, error);
+    console.error(`[feishu]: 发送失败`, error);
+    return undefined;
+  }
+}
+
+async function updateTextMessage(messageId: string, text: string): Promise<void> {
+  await client.im.v1.message.update({
+    path: {
+      message_id: messageId
+    },
+    data: {
+      msg_type: "text",
+      content: JSON.stringify({ text })
+    }
+  });
+}
+
+async function safeUpdateTextMessage(
+  messageId: string,
+  text: string,
+  context: string,
+  eventId?: string,
+  logSuccess = false,
+  openId?: string
+): Promise<void> {
+  try {
+    await updateTextMessage(messageId, text);
+  } catch (error) {
+    console.error(`[feishu]: 更新失败`, error);
   }
 }
 
 async function processUserMessage(params: {
   chatId: string;
+  sourceMessageId?: string;
   senderOpenId: string;
   text: string;
   eventId?: string;
 }): Promise<void> {
-  const { chatId, senderOpenId, text, eventId } = params;
+  const { chatId, sourceMessageId, senderOpenId, text, eventId } = params;
 
   if (text === RESET_COMMAND || text === NEW_COMMAND) {
     sessionByUser.delete(senderOpenId);
-    await safeReplyText(chatId, "上下文已重置。接下来会开启新会话。", "reset");
+    await safeReplyText(chatId, "上下文已重置。接下来会开启新会话。", "reset", sourceMessageId, eventId, true, senderOpenId);
     return;
   }
 
   const previousSessionId = sessionByUser.get(senderOpenId);
+  const STREAM_FLUSH_INTERVAL_MS = 1000;
+  const STREAM_MIN_DELTA_CHARS = 20;
+
+  type StepState = {
+    messageId?: string;
+    content: string;
+    toolLogs: string[];
+    lastPushedText: string;
+    lastQueuedText: string;
+    lastStreamSentAt: number;
+  };
+
+  const stepStates = new Map<string, StepState>();
+  const stepStack: string[] = [];
+  const stepPartIdToKey = new Map<string, string>();
+  const stepMessageIdToKey = new Map<string, string>();
+  let latestStepKey: string | undefined;
+  let unnamedStepCounter = 0;
+  let streamedAny = false;
+  let streamSendChain = Promise.resolve();
+
+  const queueStreamOperation = (operation: () => Promise<void>): void => {
+    streamSendChain = streamSendChain.then(async () => {
+      await operation();
+    });
+  };
+
+  const sendThinkingForStep = (stepKey: string): void => {
+    const state = getOrCreateStepState(stepKey);
+
+    queueStreamOperation(async () => {
+      if (state.messageId) {
+        return;
+      }
+
+      state.messageId = await safeReplyText(
+        chatId,
+        "Thinking...",
+        "opencode_stream_step_thinking",
+        sourceMessageId,
+        eventId,
+        false,
+        senderOpenId
+      );
+      streamedAny = true;
+      state.lastPushedText = "Thinking...";
+      state.lastQueuedText = "Thinking...";
+      state.lastStreamSentAt = Date.now();
+    });
+  };
+
+  const getOrCreateStepState = (stepKey: string): StepState => {
+    const existing = stepStates.get(stepKey);
+    if (existing) {
+      return existing;
+    }
+
+    const created: StepState = {
+      content: "",
+      toolLogs: [],
+      lastPushedText: "",
+      lastQueuedText: "",
+      lastStreamSentAt: 0
+    };
+    stepStates.set(stepKey, created);
+    return created;
+  };
+
+  const flushStep = (stepKey: string, force: boolean, finalize = false): void => {
+    const state = stepStates.get(stepKey);
+    if (!state) {
+      return;
+    }
+
+    const renderStepText = (): string => {
+      const blocks: string[] = [];
+      if (state.toolLogs.length > 0) {
+        blocks.push("工具调用：");
+        for (const item of state.toolLogs) {
+          blocks.push(`- ${item}`);
+        }
+      }
+
+      const contentText = state.content.trimEnd();
+      if (contentText) {
+        blocks.push(contentText);
+      }
+
+      return blocks.join("\n").trim();
+    };
+
+    const normalized = renderStepText();
+
+    if (!normalized || normalized === "工具调用：") {
+      return;
+    }
+
+    const replacingThinking = state.lastPushedText === "Thinking...";
+
+    if (!force && !replacingThinking && normalized.length - state.lastPushedText.length < STREAM_MIN_DELTA_CHARS) {
+      return;
+    }
+
+    if (!force && !replacingThinking && Date.now() - state.lastStreamSentAt < STREAM_FLUSH_INTERVAL_MS) {
+      return;
+    }
+
+    if (normalized === state.lastQueuedText) {
+      return;
+    }
+
+    state.lastQueuedText = normalized;
+
+    queueStreamOperation(async () => {
+      if (!state.messageId) {
+        state.messageId = await safeReplyText(
+          chatId,
+          normalized,
+          "opencode_stream_step_init",
+          sourceMessageId,
+          eventId,
+          finalize
+        );
+      } else {
+        await safeUpdateTextMessage(
+          state.messageId,
+          normalized,
+          "opencode_stream_step_update",
+          eventId,
+          finalize,
+          senderOpenId
+        );
+      }
+
+      streamedAny = true;
+      state.lastPushedText = normalized;
+      state.lastStreamSentAt = Date.now();
+    });
+  };
+
+  const createAnonymousStepKey = (): string => {
+    unnamedStepCounter += 1;
+    return `step_${unnamedStepCounter}`;
+  };
+
+  const openStep = (event: OpenCodeEvent): string => {
+    const messageId = event.part?.messageID;
+    if (messageId && stepMessageIdToKey.has(messageId)) {
+      return stepMessageIdToKey.get(messageId) as string;
+    }
+
+    const partId = event.part?.id;
+    if (partId && stepPartIdToKey.has(partId)) {
+      const existed = stepPartIdToKey.get(partId) as string;
+      stepStack.push(existed);
+      return existed;
+    }
+
+    const stepKey = createAnonymousStepKey();
+    if (partId) {
+      stepPartIdToKey.set(partId, stepKey);
+    }
+    if (messageId) {
+      stepMessageIdToKey.set(messageId, stepKey);
+    }
+    stepStack.push(stepKey);
+    return stepKey;
+  };
+
+  const currentStepKey = (event?: OpenCodeEvent): string => {
+    const messageId = event?.part?.messageID;
+    if (messageId && stepMessageIdToKey.has(messageId)) {
+      return stepMessageIdToKey.get(messageId) as string;
+    }
+
+    return stepStack.length > 0 ? (stepStack[stepStack.length - 1] as string) : latestStepKey ?? "step_default";
+  };
+
+  const closeStep = (event: OpenCodeEvent): string | undefined => {
+    const messageId = event.part?.messageID;
+    if (messageId && stepMessageIdToKey.has(messageId)) {
+      const stepKey = stepMessageIdToKey.get(messageId) as string;
+      const index = stepStack.lastIndexOf(stepKey);
+      if (index >= 0) {
+        stepStack.splice(index, 1);
+      }
+      return stepKey;
+    }
+
+    const partId = event.part?.id;
+    if (partId && stepPartIdToKey.has(partId)) {
+      const stepKey = stepPartIdToKey.get(partId) as string;
+      stepPartIdToKey.delete(partId);
+      const index = stepStack.lastIndexOf(stepKey);
+      if (index >= 0) {
+        stepStack.splice(index, 1);
+      }
+      return stepKey;
+    }
+
+    return stepStack.pop();
+  };
+
+  const onStreamEvent = (event: OpenCodeEvent): void => {
+    if (event.type === "step_start") {
+      const stepKey = openStep(event);
+      latestStepKey = stepKey;
+      getOrCreateStepState(stepKey);
+      sendThinkingForStep(stepKey);
+      return;
+    }
+
+    if (event.type === "text" && event.part?.text) {
+      const stepKey = currentStepKey(event);
+      latestStepKey = stepKey;
+      const state = getOrCreateStepState(stepKey);
+      state.content += event.part.text;
+      flushStep(stepKey, false, false);
+      return;
+    }
+
+    if (event.type === "tool_use") {
+      const stepKey = currentStepKey(event);
+      latestStepKey = stepKey;
+      const state = getOrCreateStepState(stepKey);
+      const toolName = event.part?.tool ?? "unknown";
+      const status = event.part?.state?.status ?? "running";
+      const description = event.part?.state?.input?.description;
+      const text = description
+        ? `${toolName} (${status}) - ${description}`
+        : `${toolName} (${status})`;
+
+      state.toolLogs.push(text);
+      if (state.toolLogs.length > 6) {
+        state.toolLogs = state.toolLogs.slice(-6);
+      }
+
+      flushStep(stepKey, true, false);
+      return;
+    }
+
+    if (event.type === "step_finish") {
+      const stepKey = closeStep(event) ?? latestStepKey;
+      if (stepKey) {
+        flushStep(stepKey, true, true);
+      }
+    }
+  };
 
   try {
     console.log(
-      `[opencode] start open_id=${senderOpenId} event_id=${eventId ?? "unknown"} session=${previousSessionId ?? "new"}`
+      `[opencode]: start open_id=${senderOpenId} event_id=${eventId ?? "unknown"} session=${previousSessionId ?? "new"}`
     );
     const result = await askOpenCode({
       message: text,
       sessionId: previousSessionId,
       model: config.opencodeModel,
-      timeoutMs: config.opencodeTimeoutMs
+      timeoutMs: config.opencodeTimeoutMs,
+      onEvent: onStreamEvent
     });
 
     sessionByUser.set(senderOpenId, result.sessionId);
     console.log(
-      `[opencode] success open_id=${senderOpenId} event_id=${eventId ?? "unknown"} session=${result.sessionId}`
+      `[opencode]: success open_id=${senderOpenId} event_id=${eventId ?? "unknown"} session=${result.sessionId}`
     );
-    await safeReplyText(chatId, result.text, "opencode_success");
+    for (const stepKey of stepStates.keys()) {
+      flushStep(stepKey, true, true);
+    }
+
+    await streamSendChain;
+
+    if (!streamedAny) {
+      await safeReplyText(chatId, result.text, "opencode_success", sourceMessageId, eventId, true, senderOpenId);
+      return;
+    }
   } catch (error) {
     const errorMessage =
       error instanceof Error && error.message
         ? error.message
         : "调用 OpenCode 失败，请稍后重试。";
-    console.error(`[opencode] failed open_id=${senderOpenId}`, error);
-    await safeReplyText(chatId, `处理失败：${errorMessage}`, "opencode_error");
+    console.error(`[opencode]: failed open_id=${senderOpenId}`, error);
+    await safeReplyText(chatId, `处理失败：${errorMessage}`, "opencode_error", sourceMessageId, eventId, true, senderOpenId);
   }
 }
 
@@ -164,7 +476,7 @@ const eventDispatcher = new Lark.EventDispatcher({}).register({
     cleanupHandledEvents(now);
 
     if (eventId && handledEvents.has(eventId)) {
-      console.log(`[event] skip duplicated event_id=${eventId}`);
+      console.log(`[feishu]: skip duplicated event_id=${eventId}`);
       return;
     }
 
@@ -187,18 +499,20 @@ const eventDispatcher = new Lark.EventDispatcher({}).register({
       return;
     }
 
+    const sourceMessageId = data.message?.message_id;
+
     const messageType = data.message?.message_type;
     if (messageType !== "text") {
-      await safeReplyText(chatId, "当前仅支持文本消息。", "non_text");
+      await safeReplyText(chatId, "当前仅支持文本消息。", "non_text", sourceMessageId, eventId, true, senderOpenId);
       return;
     }
 
     const text = parseTextContent(data.message.content);
     console.log(
-      `[event] receive open_id=${senderOpenId} event_id=${eventId ?? "unknown"} message_type=${messageType} text=${JSON.stringify(text)}`
+      `[feishu]: receive open_id=${senderOpenId} event_id=${eventId ?? "unknown"} message_type=${messageType} text=${JSON.stringify(text)}`
     );
     if (!text) {
-      await safeReplyText(chatId, "消息内容为空或格式不支持。", "empty_text");
+      await safeReplyText(chatId, "消息内容为空或格式不支持。", "empty_text", sourceMessageId, eventId, true, senderOpenId);
       return;
     }
 
@@ -210,13 +524,24 @@ const eventDispatcher = new Lark.EventDispatcher({}).register({
         allowedOpenIds.add(senderOpenId);
         try {
           persistAllowedOpenId(senderOpenId);
-          await safeReplyText(chatId, `鉴权成功，已将 open_id 加入 .env：${senderOpenId}`, "auth_success");
+          await safeReplyText(
+            chatId,
+            `鉴权成功，已将 open_id 加入 .env：${senderOpenId}`,
+            "auth_success",
+            sourceMessageId,
+            eventId,
+            true,
+            senderOpenId
+          );
         } catch (error) {
           await safeReplyText(
             chatId,
-            `鉴权成功，但写入 .env 失败。你的 open_id：${senderOpenId}，请手动加入 ALLOWED_OPEN_ID。`
-            ,
-            "auth_persist_error"
+            `鉴权成功，但写入 .env 失败。你的 open_id：${senderOpenId}，请手动加入 ALLOWED_OPEN_ID。`,
+            "auth_persist_error",
+            sourceMessageId,
+            eventId,
+            true,
+            senderOpenId
           );
           console.error("写入 ALLOWED_OPEN_ID 失败:", error);
         }
@@ -225,19 +550,23 @@ const eventDispatcher = new Lark.EventDispatcher({}).register({
 
       const remainingSeconds = Math.max(1, Math.floor((pending.expiresAt - Date.now()) / 1000));
       console.log(
-        `[auth] open_id=${senderOpenId} 临时token=${pending.token} 有效期=${remainingSeconds}s`
+        `[feishu]: auth open_id=${senderOpenId} 临时token=${pending.token} 有效期=${remainingSeconds}s`
       );
 
       await safeReplyText(
         chatId,
         `当前用户未授权。你的 open_id：${senderOpenId}。\n请联系管理员查看服务日志中的临时 token，并在10分钟内回发该 token 完成验证。`,
-        "auth_required"
+        "auth_required",
+        sourceMessageId,
+        eventId,
+        true,
+        senderOpenId
       );
       return;
     }
 
     enqueueUserMessage(senderOpenId, async () => {
-      await processUserMessage({ chatId, senderOpenId, text, eventId });
+      await processUserMessage({ chatId, sourceMessageId, senderOpenId, text, eventId });
     });
   }
 });
