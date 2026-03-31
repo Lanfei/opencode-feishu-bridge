@@ -69,17 +69,44 @@ function writeEnvContent(content: string): void {
   writeFileSync(envPath, content, "utf8");
 }
 
+function parseAllowedOpenIdsFromEnv(content: string): string[] {
+  const match = content.match(/^ALLOWED_OPEN_ID=(.*)$/m);
+  if (!match) {
+    return [];
+  }
+
+  return (match[1] ?? "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
 export function persistAllowedOpenId(openId: string): void {
   const cleanOpenId = openId.trim();
   if (!cleanOpenId) {
     return;
   }
 
-  allowedOpenIds.add(cleanOpenId);
-  const merged = Array.from(allowedOpenIds).join(",");
-  const envContent = readEnvContent();
-  const nextContent = updateEnvValue(envContent, "ALLOWED_OPEN_ID", merged);
-  writeEnvContent(nextContent);
+  const maxAttempts = 3;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const envContent = readEnvContent();
+    const diskIds = parseAllowedOpenIdsFromEnv(envContent);
+    const mergedSet = new Set([...allowedOpenIds, ...diskIds, cleanOpenId]);
+    const merged = Array.from(mergedSet).join(",");
+    const nextContent = updateEnvValue(envContent, "ALLOWED_OPEN_ID", merged);
+    writeEnvContent(nextContent);
+
+    const verifyIds = new Set(parseAllowedOpenIdsFromEnv(readEnvContent()));
+    if (verifyIds.has(cleanOpenId)) {
+      for (const id of verifyIds) {
+        allowedOpenIds.add(id);
+      }
+      return;
+    }
+  }
+
+  throw new Error(`写入 ALLOWED_OPEN_ID 失败：重试 ${String(maxAttempts)} 次后未校验通过`);
 }
 
 export const config = {
