@@ -19,10 +19,42 @@ const handledEvents = new Map<string, number>();
 const allowedOpenIds = new Set(config.allowedOpenIds);
 const sessionByUser = new Map<string, string>();
 const pendingTokens = new Map<string, { token: string; expiresAt: number }>();
+const userMessageQueues = new Map<string, Promise<void>>();
+const queuedMessageCount = new Map<string, number>();
 const DEDUPE_TTL_MS = 10 * 60 * 1000;
 const TOKEN_TTL_MS = 10 * 60 * 1000;
 const RESET_COMMAND = "/reset";
 const NEW_COMMAND = "/new";
+
+function enqueueUserMessage(openId: string, task: () => Promise<void>): void {
+  const previous = userMessageQueues.get(openId) ?? Promise.resolve();
+  const nextCount = (queuedMessageCount.get(openId) ?? 0) + 1;
+  queuedMessageCount.set(openId, nextCount);
+
+  if (nextCount > 1) {
+    console.log(`[queue] open_id=${openId} queued=${nextCount}`);
+  }
+
+  const current = previous
+    .catch(() => {
+      return;
+    })
+    .then(task)
+    .finally(() => {
+      const rest = (queuedMessageCount.get(openId) ?? 1) - 1;
+      if (rest <= 0) {
+        queuedMessageCount.delete(openId);
+        if (userMessageQueues.get(openId) === current) {
+          userMessageQueues.delete(openId);
+        }
+        return;
+      }
+
+      queuedMessageCount.set(openId, rest);
+    });
+
+  userMessageQueues.set(openId, current);
+}
 
 function cleanupHandledEvents(now: number): void {
   for (const [eventId, timestamp] of handledEvents.entries()) {
@@ -87,8 +119,9 @@ async function processUserMessage(params: {
   chatId: string;
   senderOpenId: string;
   text: string;
+  eventId?: string;
 }): Promise<void> {
-  const { chatId, senderOpenId, text } = params;
+  const { chatId, senderOpenId, text, eventId } = params;
 
   if (text === RESET_COMMAND || text === NEW_COMMAND) {
     sessionByUser.delete(senderOpenId);
@@ -99,7 +132,9 @@ async function processUserMessage(params: {
   const previousSessionId = sessionByUser.get(senderOpenId);
 
   try {
-    console.log(`[opencode] start open_id=${senderOpenId} session=${previousSessionId ?? "new"}`);
+    console.log(
+      `[opencode] start open_id=${senderOpenId} event_id=${eventId ?? "unknown"} session=${previousSessionId ?? "new"}`
+    );
     const result = await askOpenCode({
       message: text,
       sessionId: previousSessionId,
@@ -108,7 +143,9 @@ async function processUserMessage(params: {
     });
 
     sessionByUser.set(senderOpenId, result.sessionId);
-    console.log(`[opencode] success open_id=${senderOpenId} session=${result.sessionId}`);
+    console.log(
+      `[opencode] success open_id=${senderOpenId} event_id=${eventId ?? "unknown"} session=${result.sessionId}`
+    );
     await safeReplyText(chatId, result.text, "opencode_success");
   } catch (error) {
     const errorMessage =
@@ -158,7 +195,7 @@ const eventDispatcher = new Lark.EventDispatcher({}).register({
 
     const text = parseTextContent(data.message.content);
     console.log(
-      `[event] receive open_id=${senderOpenId} message_type=${messageType} text=${JSON.stringify(text)}`
+      `[event] receive open_id=${senderOpenId} event_id=${eventId ?? "unknown"} message_type=${messageType} text=${JSON.stringify(text)}`
     );
     if (!text) {
       await safeReplyText(chatId, "消息内容为空或格式不支持。", "empty_text");
@@ -199,7 +236,9 @@ const eventDispatcher = new Lark.EventDispatcher({}).register({
       return;
     }
 
-    void processUserMessage({ chatId, senderOpenId, text });
+    enqueueUserMessage(senderOpenId, async () => {
+      await processUserMessage({ chatId, senderOpenId, text, eventId });
+    });
   }
 });
 
