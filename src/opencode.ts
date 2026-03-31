@@ -44,6 +44,17 @@ export type OpenCodeSession = {
   directory?: string;
 };
 
+export type OpenCodeModel = {
+  id: string;
+  provider: string;
+};
+
+export type OpenCodeSessionModel = {
+  providerId: string;
+  modelId: string;
+  id: string;
+};
+
 type ServeConfig = {
   hostname: string;
   port: number;
@@ -235,6 +246,209 @@ export async function listOpenCodeSessions(maxCount = 10): Promise<OpenCodeSessi
   }
 
   return sessions;
+}
+
+export async function listOpenCodeModels(): Promise<OpenCodeModel[]> {
+  const providers = await listConfiguredProviderIds();
+  if (providers.length === 0) {
+    return [];
+  }
+
+  const providerSet = new Set(providers);
+  const { stdout, stderr, code, signal, timedOut } = await runCommand(["models"], 20000);
+
+  if (code !== 0) {
+    const stderrText = stderr.trim();
+    const stdoutText = stdout.trim();
+    const reason = [
+      `code=${String(code)}`,
+      signal ? `signal=${signal}` : "",
+      stderrText ? `stderr=${stderrText}` : "",
+      !stderrText && stdoutText ? `stdout=${stdoutText}` : ""
+    ]
+      .filter(Boolean)
+      .join(" | ");
+    const timeoutHint = timedOut ? " | 可能超时" : "";
+    throw new Error(`查询 OpenCode 模型失败: ${reason || "未知错误"}${timeoutHint}`);
+  }
+
+  const modelIds = stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const models: OpenCodeModel[] = [];
+
+  for (const id of modelIds) {
+    const separatorIndex = id.indexOf("/");
+    if (separatorIndex <= 0) {
+      continue;
+    }
+
+    const provider = id.slice(0, separatorIndex);
+    if (!providerSet.has(provider)) {
+      continue;
+    }
+
+    models.push({ id, provider });
+  }
+
+  return models;
+}
+
+export async function getOpenCodeSessionLatestModel(sessionId: string): Promise<OpenCodeSessionModel | undefined> {
+  const id = sessionId.trim();
+  if (!id) {
+    return undefined;
+  }
+
+  const { stdout, stderr, code, signal, timedOut } = await runCommand(["export", id], 20000);
+  if (code !== 0) {
+    const stderrText = stderr.trim();
+    const stdoutText = stdout.trim();
+    const reason = [
+      `code=${String(code)}`,
+      signal ? `signal=${signal}` : "",
+      stderrText ? `stderr=${stderrText}` : "",
+      !stderrText && stdoutText ? `stdout=${stdoutText}` : ""
+    ]
+      .filter(Boolean)
+      .join(" | ");
+    const timeoutHint = timedOut ? " | 可能超时" : "";
+    throw new Error(`查询 OpenCode 会话模型失败: ${reason || "未知错误"}${timeoutHint}`);
+  }
+
+  const jsonStart = stdout.indexOf("{");
+  if (jsonStart < 0) {
+    return undefined;
+  }
+
+  const parsed = JSON.parse(stdout.slice(jsonStart)) as {
+    messages?: Array<{
+      info?: {
+        role?: string;
+        model?: {
+          providerID?: string;
+          modelID?: string;
+        };
+      };
+    }>;
+  };
+
+  if (!Array.isArray(parsed.messages)) {
+    return undefined;
+  }
+
+  const messages = parsed.messages;
+
+  const pickLatestModel = (
+    role?: string
+  ): OpenCodeSessionModel | undefined => {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const info = messages[index]?.info;
+      if (role && info?.role !== role) {
+        continue;
+      }
+
+      const model = info?.model;
+      const providerId = model?.providerID?.trim();
+      const modelId = model?.modelID?.trim();
+      if (providerId && modelId) {
+        return {
+          providerId,
+          modelId,
+          id: `${providerId}/${modelId}`
+        };
+      }
+    }
+
+    return undefined;
+  };
+
+  return pickLatestModel("assistant") ?? pickLatestModel();
+}
+
+async function listConfiguredProviderIds(): Promise<string[]> {
+  const { stdout, stderr, code, signal, timedOut } = await runCommand(["providers", "list"], 15000);
+
+  if (code !== 0) {
+    const stderrText = stderr.trim();
+    const stdoutText = stdout.trim();
+    const reason = [
+      `code=${String(code)}`,
+      signal ? `signal=${signal}` : "",
+      stderrText ? `stderr=${stderrText}` : "",
+      !stderrText && stdoutText ? `stdout=${stdoutText}` : ""
+    ]
+      .filter(Boolean)
+      .join(" | ");
+    const timeoutHint = timedOut ? " | 可能超时" : "";
+    throw new Error(`查询 OpenCode provider 失败: ${reason || "未知错误"}${timeoutHint}`);
+  }
+
+  const cleanText = stripAnsi(stdout);
+  const providerIds: string[] = [];
+  const seen = new Set<string>();
+
+  for (const rawLine of cleanText.split("\n")) {
+    const line = rawLine.trim();
+    if (!line.startsWith("●")) {
+      continue;
+    }
+
+    const rawProvider = line.replace(/^●\s+/, "").trim();
+    if (!rawProvider) {
+      continue;
+    }
+
+    const parts = rawProvider.split(/\s+/);
+    const last = parts[parts.length - 1]?.trim();
+    if (last && (last.toLowerCase() === "api" || /^[A-Z0-9_]+$/.test(last))) {
+      parts.pop();
+    }
+
+    const providerName = parts.join(" ").trim();
+    if (!providerName) {
+      continue;
+    }
+
+    const providerId = providerDisplayNameToId(providerName);
+    if (!providerId || seen.has(providerId)) {
+      continue;
+    }
+
+    seen.add(providerId);
+    providerIds.push(providerId);
+  }
+
+  return providerIds;
+}
+
+function providerDisplayNameToId(name: string): string {
+  const normalized = name.trim().toLowerCase();
+  const mapped: Record<string, string> = {
+    anthropic: "anthropic",
+    google: "google",
+    openai: "openai",
+    xai: "xai",
+    opencode: "opencode",
+    "google vertex": "google-vertex",
+    "google vertex anthropic": "google-vertex-anthropic",
+    "azure openai": "azure-openai"
+  };
+
+  if (mapped[normalized]) {
+    return mapped[normalized];
+  }
+
+  return normalized
+    .replace(/[^a-z0-9\s-]/g, "")
+    .trim()
+    .replace(/\s+/g, "-");
+}
+
+function stripAnsi(input: string): string {
+  return input.replace(/\u001b\[[0-9;]*m/g, "");
 }
 
 async function startServeProcess(config: ServeConfig): Promise<void> {

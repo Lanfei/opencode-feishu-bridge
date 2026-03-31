@@ -34,6 +34,8 @@ npm run dev
 3. 完成授权后发送消息，机器人会返回 OpenCode 的回答。
 4. 如需清空上下文，发送 `/reset` 或 `/new`。
 5. 如需查看可恢复会话，发送 `/resume`；如需切换到某个会话，发送 `/resume <编号|session_id>`。
+6. 如需查看已配置 provider 的可用模型，发送 `/models`。
+7. 如需查看当前会话最近使用模型，发送 `/model`；如需切换模型，发送 `/model <model_id>`。
 
 ## 4. 飞书后台最小配置
 

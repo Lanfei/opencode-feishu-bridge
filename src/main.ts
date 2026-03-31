@@ -3,8 +3,10 @@ import { randomBytes } from "node:crypto";
 import { config, persistAllowedOpenId } from "./config";
 import {
   askOpenCode,
+  getOpenCodeSessionLatestModel,
   initOpenCodeServe,
   isAbortError,
+  listOpenCodeModels,
   listOpenCodeSessions,
   OpenCodeEvent,
   stopOpenCodeServe
@@ -25,6 +27,7 @@ const wsClient = new Lark.WSClient({
 const handledEvents = new Map<string, number>();
 const allowedOpenIds = new Set(config.allowedOpenIds);
 const sessionByUser = new Map<string, string>();
+const modelByUser = new Map<string, string>();
 const pendingTokens = new Map<string, { token: string; expiresAt: number }>();
 type UserQueueTask = (signal: AbortSignal) => Promise<void>;
 
@@ -46,6 +49,8 @@ const TOKEN_TTL_MS = 10 * 60 * 1000;
 const RESET_COMMAND = "/reset";
 const NEW_COMMAND = "/new";
 const RESUME_COMMAND = "/resume";
+const MODELS_COMMAND = "/models";
+const MODEL_COMMAND = "/model";
 
 function getOrCreateQueueState(openId: string): UserQueueState {
   const existed = userMessageQueues.get(openId);
@@ -193,6 +198,56 @@ function parseResumeCommand(text: string): { isResume: boolean; sessionId?: stri
     isResume: true,
     sessionId: rawArg.split(/\s+/)[0]
   };
+}
+
+function isModelsCommand(text: string): boolean {
+  return /^\/models(?:\s+)?$/.test(text.trim());
+}
+
+function parseModelCommand(text: string): { isModel: boolean; model?: string } {
+  const trimmed = text.trim();
+  const modelPattern = new RegExp(`^${escapeRegExp(MODEL_COMMAND)}(?:\\s+(.+))?$`);
+  const matched = trimmed.match(modelPattern);
+  if (!matched) {
+    return { isModel: false };
+  }
+
+  const rawArg = matched[1]?.trim();
+  if (!rawArg) {
+    return { isModel: true };
+  }
+
+  return {
+    isModel: true,
+    model: rawArg.split(/\s+/)[0]
+  };
+}
+
+function splitLinesByLength(lines: string[], maxChars: number): string[] {
+  const chunks: string[] = [];
+  let current = "";
+
+  for (const line of lines) {
+    const next = current ? `${current}\n${line}` : line;
+    if (next.length <= maxChars) {
+      current = next;
+      continue;
+    }
+
+    if (current) {
+      chunks.push(current);
+      current = line;
+      continue;
+    }
+
+    chunks.push(line);
+  }
+
+  if (current) {
+    chunks.push(current);
+  }
+
+  return chunks;
 }
 
 function generateTempToken(): string {
@@ -355,7 +410,75 @@ async function processUserMessage(params: {
 
   if (text === RESET_COMMAND || text === NEW_COMMAND) {
     sessionByUser.delete(senderOpenId);
+    modelByUser.delete(senderOpenId);
     await safeReplyText(chatId, "上下文已重置。接下来会开启新会话。", sourceMessageId, eventId, senderOpenId, signal);
+    return;
+  }
+
+  const modelCommand = parseModelCommand(text);
+  if (modelCommand.isModel) {
+    if (!modelCommand.model) {
+      const selectedModel = modelByUser.get(senderOpenId) ?? config.opencodeModel;
+      const currentSessionId = sessionByUser.get(senderOpenId);
+
+      if (currentSessionId) {
+        try {
+          const latestModel = await getOpenCodeSessionLatestModel(currentSessionId);
+          if (latestModel) {
+            const selectedHint =
+              selectedModel && selectedModel !== latestModel.id
+                ? `\n当前已选择模型：${selectedModel}`
+                : "";
+            await safeReplyText(
+              chatId,
+              `当前会话最近使用模型：${latestModel.id}${selectedHint}`,
+              sourceMessageId,
+              eventId,
+              senderOpenId,
+              signal
+            );
+            return;
+          }
+        } catch (error) {
+          console.warn(
+            `[opencode]: fetch_session_model_failed open_id=${senderOpenId} session=${currentSessionId}`,
+            error
+          );
+        }
+      }
+
+      if (selectedModel) {
+        await safeReplyText(
+          chatId,
+          `当前已选择模型：${selectedModel}`,
+          sourceMessageId,
+          eventId,
+          senderOpenId,
+          signal
+        );
+        return;
+      }
+
+      await safeReplyText(
+        chatId,
+        "当前未指定模型（使用 OpenCode 默认模型）。",
+        sourceMessageId,
+        eventId,
+        senderOpenId,
+        signal
+      );
+      return;
+    }
+
+    modelByUser.set(senderOpenId, modelCommand.model);
+    await safeReplyText(
+      chatId,
+      `已切换当前会话模型：${modelCommand.model}`,
+      sourceMessageId,
+      eventId,
+      senderOpenId,
+      signal
+    );
     return;
   }
 
@@ -422,7 +545,53 @@ async function processUserMessage(params: {
     }
   }
 
+  if (isModelsCommand(text)) {
+    try {
+      const models = await listOpenCodeModels();
+      if (models.length === 0) {
+        await safeReplyText(
+          chatId,
+          "当前没有可用模型（可能尚未配置任何 provider 凭证）。",
+          sourceMessageId,
+          eventId,
+          senderOpenId,
+          signal
+        );
+        return;
+      }
+
+      const lines = models.map((model, index) => `${String(index + 1)}. ${model.id}`);
+      const chunks = splitLinesByLength(lines, 2800);
+
+      for (let i = 0; i < chunks.length; i += 1) {
+        if (signal?.aborted) {
+          return;
+        }
+
+        const title =
+          chunks.length === 1
+            ? `可用模型（共 ${String(models.length)} 个）：`
+            : `可用模型（共 ${String(models.length)} 个，第 ${String(i + 1)}/${String(chunks.length)} 条）：`;
+        await safeReplyText(
+          chatId,
+          `${title}\n${chunks[i] as string}`,
+          sourceMessageId,
+          eventId,
+          senderOpenId,
+          signal
+        );
+      }
+      return;
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error && error.message ? error.message : "查询模型失败，请稍后再试。";
+      await safeReplyText(chatId, `处理失败：${errorMessage}`, sourceMessageId, eventId, senderOpenId, signal);
+      return;
+    }
+  }
+
   const previousSessionId = sessionByUser.get(senderOpenId);
+  const currentModel = modelByUser.get(senderOpenId) ?? config.opencodeModel;
   const STREAM_FLUSH_INTERVAL_MS = 1000;
   const STREAM_MIN_DELTA_CHARS = 20;
 
@@ -773,7 +942,7 @@ async function processUserMessage(params: {
     const result = await askOpenCode({
       message: text,
       sessionId: previousSessionId,
-      model: config.opencodeModel,
+      model: currentModel,
       timeoutMs: config.opencodeTimeoutMs,
       onEvent: onStreamEvent,
       signal
