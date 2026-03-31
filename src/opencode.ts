@@ -1,5 +1,21 @@
 import { spawn } from "node:child_process";
 
+const OPENCODE_ABORT_ERROR = "OPENCODE_ABORT_ERROR";
+
+function createAbortError(): Error {
+  const error = new Error("OpenCode 请求已取消。") as Error & { code?: string };
+  error.code = OPENCODE_ABORT_ERROR;
+  return error;
+}
+
+export function isAbortError(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+
+  return (error as { code?: string }).code === OPENCODE_ABORT_ERROR;
+}
+
 export type OpenCodeEvent = {
   type?: string;
   sessionID?: string;
@@ -78,7 +94,12 @@ export async function askOpenCode(params: {
   timeoutMs: number;
   onTextDelta?: (text: string) => void;
   onEvent?: (event: OpenCodeEvent) => void;
+  signal?: AbortSignal;
 }): Promise<{ text: string; sessionId: string }> {
+  if (params.signal?.aborted) {
+    throw createAbortError();
+  }
+
   if (!currentServeConfig) {
     throw new Error("OpenCode serve 未初始化，请先调用 initOpenCodeServe。");
   }
@@ -101,10 +122,11 @@ export async function askOpenCode(params: {
   const textParts: string[] = [];
   let resolvedSessionId = params.sessionId ?? "";
 
-  const { stdout, stderr, code, signal, timedOut } = await runCommandStreaming(
+  const { stdout, stderr, code, signal, timedOut, aborted } = await runCommandStreaming(
     args,
     params.timeoutMs,
     currentServeConfig.password,
+    params.signal,
     (event) => {
       params.onEvent?.(event);
 
@@ -118,6 +140,10 @@ export async function askOpenCode(params: {
       }
     }
   );
+
+  if (aborted || params.signal?.aborted) {
+    throw createAbortError();
+  }
 
   if (code !== 0) {
     const stderrText = stderr.trim();
@@ -293,8 +319,16 @@ async function runCommandStreaming(
   args: string[],
   timeoutMs: number,
   password: string,
+  abortSignal: AbortSignal | undefined,
   onEvent: (event: OpenCodeEvent) => void
-): Promise<{ stdout: string; stderr: string; code: number | null; signal: NodeJS.Signals | null; timedOut: boolean }> {
+): Promise<{
+  stdout: string;
+  stderr: string;
+  code: number | null;
+  signal: NodeJS.Signals | null;
+  timedOut: boolean;
+  aborted: boolean;
+}> {
   return await new Promise((resolve, reject) => {
     const child = spawn("opencode", args, {
       cwd: process.cwd(),
@@ -308,7 +342,33 @@ async function runCommandStreaming(
     const stdoutParts: Buffer[] = [];
     const stderrParts: Buffer[] = [];
     let timedOut = false;
+    let aborted = false;
+    let closed = false;
     let stdoutTextBuffer = "";
+    let abortKillTimer: NodeJS.Timeout | undefined;
+
+    const onAbort = (): void => {
+      aborted = true;
+      if (!child.killed) {
+        child.kill("SIGTERM");
+      }
+
+      if (!abortKillTimer) {
+        abortKillTimer = setTimeout(() => {
+          if (!closed && child.exitCode === null) {
+            child.kill("SIGKILL");
+          }
+        }, 5000);
+      }
+    };
+
+    if (abortSignal) {
+      if (abortSignal.aborted) {
+        onAbort();
+      } else {
+        abortSignal.addEventListener("abort", onAbort, { once: true });
+      }
+    }
 
     child.stdout.on("data", (chunk: Buffer) => {
       stdoutParts.push(chunk);
@@ -347,7 +407,12 @@ async function runCommandStreaming(
     }, timeoutMs);
 
     child.on("close", (code, signal) => {
+      closed = true;
       clearTimeout(timeout);
+      if (abortKillTimer) {
+        clearTimeout(abortKillTimer);
+      }
+      abortSignal?.removeEventListener("abort", onAbort);
 
       if (stdoutTextBuffer.trim()) {
         try {
@@ -363,7 +428,8 @@ async function runCommandStreaming(
         stderr: Buffer.concat(stderrParts).toString("utf8"),
         code,
         signal,
-        timedOut
+        timedOut,
+        aborted
       });
     });
 

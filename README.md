@@ -38,7 +38,7 @@ npm run dev
 
 - 启用机器人能力
 - 开启事件订阅（长连接模式）
-- 订阅 `接收消息 v2.0` 事件（`im.message.receive_v1`）
+- 订阅 `接收消息 v2.0`（`im.message.receive_v1`）和 `消息撤回事件`（`im.message.recalled_v1`）
 - 授权机器人可读取并发送消息
 
 ## 5. 说明

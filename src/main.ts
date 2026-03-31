@@ -1,7 +1,13 @@
 import * as Lark from "@larksuiteoapi/node-sdk";
 import { randomBytes } from "node:crypto";
 import { config, persistAllowedOpenId } from "./config";
-import { askOpenCode, initOpenCodeServe, OpenCodeEvent, stopOpenCodeServe } from "./opencode";
+import {
+  askOpenCode,
+  initOpenCodeServe,
+  isAbortError,
+  OpenCodeEvent,
+  stopOpenCodeServe
+} from "./opencode";
 
 const client = new Lark.Client({
   appId: config.appId,
@@ -19,41 +25,124 @@ const handledEvents = new Map<string, number>();
 const allowedOpenIds = new Set(config.allowedOpenIds);
 const sessionByUser = new Map<string, string>();
 const pendingTokens = new Map<string, { token: string; expiresAt: number }>();
-const userMessageQueues = new Map<string, Promise<void>>();
-const queuedMessageCount = new Map<string, number>();
+type UserQueueTask = (signal: AbortSignal) => Promise<void>;
+
+type UserQueueItem = {
+  sourceMessageId?: string;
+  task: UserQueueTask;
+  controller: AbortController;
+};
+
+type UserQueueState = {
+  items: UserQueueItem[];
+  isProcessing: boolean;
+  activeItem?: UserQueueItem;
+};
+
+const userMessageQueues = new Map<string, UserQueueState>();
 const DEDUPE_TTL_MS = 10 * 60 * 1000;
 const TOKEN_TTL_MS = 10 * 60 * 1000;
 const RESET_COMMAND = "/reset";
 const NEW_COMMAND = "/new";
 
-function enqueueUserMessage(openId: string, task: () => Promise<void>): void {
-  const previous = userMessageQueues.get(openId) ?? Promise.resolve();
-  const nextCount = (queuedMessageCount.get(openId) ?? 0) + 1;
-  queuedMessageCount.set(openId, nextCount);
-
-  if (nextCount > 1) {
-    console.log(`[queue]: open_id=${openId} queued=${nextCount}`);
+function getOrCreateQueueState(openId: string): UserQueueState {
+  const existed = userMessageQueues.get(openId);
+  if (existed) {
+    return existed;
   }
 
-  const current = previous
-    .catch(() => {
-      return;
-    })
-    .then(task)
-    .finally(() => {
-      const rest = (queuedMessageCount.get(openId) ?? 1) - 1;
-      if (rest <= 0) {
-        queuedMessageCount.delete(openId);
-        if (userMessageQueues.get(openId) === current) {
-          userMessageQueues.delete(openId);
-        }
-        return;
+  const created: UserQueueState = {
+    items: [],
+    isProcessing: false
+  };
+  userMessageQueues.set(openId, created);
+  return created;
+}
+
+async function drainUserQueue(openId: string, state: UserQueueState): Promise<void> {
+  if (state.isProcessing) {
+    return;
+  }
+
+  state.isProcessing = true;
+
+  while (state.items.length > 0) {
+    const current = state.items.shift();
+    if (!current) {
+      break;
+    }
+
+    state.activeItem = current;
+
+    try {
+      if (!current.controller.signal.aborted) {
+        await current.task(current.controller.signal);
       }
+    } catch (error) {
+      if (isAbortError(error)) {
+        console.log(
+          `[queue]: action=skipped_aborted_task open_id=${openId} message_id=${current.sourceMessageId ?? "unknown"}`
+        );
+      } else {
+        console.error(
+          `[queue]: action=task_failed open_id=${openId} message_id=${current.sourceMessageId ?? "unknown"}`,
+          error
+        );
+      }
+    } finally {
+      state.activeItem = undefined;
+    }
+  }
 
-      queuedMessageCount.set(openId, rest);
-    });
+  state.isProcessing = false;
 
-  userMessageQueues.set(openId, current);
+  if (state.items.length === 0 && !state.activeItem) {
+    userMessageQueues.delete(openId);
+  }
+}
+
+function enqueueUserMessage(openId: string, sourceMessageId: string | undefined, task: UserQueueTask): void {
+  const state = getOrCreateQueueState(openId);
+  state.items.push({
+    sourceMessageId,
+    task,
+    controller: new AbortController()
+  });
+
+  const queueSize = state.items.length + (state.activeItem ? 1 : 0);
+  if (queueSize > 1) {
+    console.log(`[queue]: action=queued open_id=${openId} queued=${queueSize}`);
+  }
+
+  void drainUserQueue(openId, state);
+}
+
+function handleMessageRecalled(messageId: string): { aborted: number; removed: number } {
+  let aborted = 0;
+  let removed = 0;
+
+  for (const [openId, state] of userMessageQueues.entries()) {
+    if (state.activeItem?.sourceMessageId === messageId && !state.activeItem.controller.signal.aborted) {
+      state.activeItem.controller.abort();
+      aborted += 1;
+    }
+
+    const before = state.items.length;
+    state.items = state.items.filter((item) => item.sourceMessageId !== messageId);
+    const removedCount = before - state.items.length;
+    if (removedCount > 0) {
+      removed += removedCount;
+      console.log(
+        `[queue]: action=removed_pending open_id=${openId} message_id=${messageId} removed=${removedCount}`
+      );
+    }
+
+    if (!state.isProcessing && state.items.length === 0 && !state.activeItem) {
+      userMessageQueues.delete(openId);
+    }
+  }
+
+  return { aborted, removed };
 }
 
 function cleanupHandledEvents(now: number): void {
@@ -136,12 +225,24 @@ async function safeReplyText(
   text: string,
   replyToMessageId?: string,
   eventId?: string,
-  openId?: string
+  openId?: string,
+  signal?: AbortSignal
 ): Promise<string | undefined> {
+  if (signal?.aborted) {
+    return undefined;
+  }
+
   try {
     const messageId = await replyText(chatId, text, replyToMessageId);
+    if (signal?.aborted) {
+      return undefined;
+    }
     return messageId;
   } catch (error) {
+    if (signal?.aborted) {
+      return undefined;
+    }
+
     const errorCode =
       typeof error === "object" && error !== null && "code" in error
         ? String((error as { code?: unknown }).code ?? "unknown")
@@ -170,12 +271,24 @@ async function safeUpdateTextMessage(
   messageId: string,
   text: string,
   eventId?: string,
-  openId?: string
+  openId?: string,
+  signal?: AbortSignal
 ): Promise<boolean> {
+  if (signal?.aborted) {
+    return false;
+  }
+
   try {
     await updateTextMessage(messageId, text);
+    if (signal?.aborted) {
+      return false;
+    }
     return true;
   } catch (error) {
+    if (signal?.aborted) {
+      return false;
+    }
+
     const errorCode =
       typeof error === "object" && error !== null && "code" in error
         ? String((error as { code?: unknown }).code ?? "unknown")
@@ -194,12 +307,17 @@ async function processUserMessage(params: {
   senderOpenId: string;
   text: string;
   eventId?: string;
+  signal?: AbortSignal;
 }): Promise<void> {
-  const { chatId, sourceMessageId, senderOpenId, text, eventId } = params;
+  const { chatId, sourceMessageId, senderOpenId, text, eventId, signal } = params;
+
+  if (signal?.aborted) {
+    return;
+  }
 
   if (text === RESET_COMMAND || text === NEW_COMMAND) {
     sessionByUser.delete(senderOpenId);
-    await safeReplyText(chatId, "上下文已重置。接下来会开启新会话。", sourceMessageId, eventId, senderOpenId);
+    await safeReplyText(chatId, "上下文已重置。接下来会开启新会话。", sourceMessageId, eventId, senderOpenId, signal);
     return;
   }
 
@@ -228,7 +346,14 @@ async function processUserMessage(params: {
   let streamSendChain = Promise.resolve();
 
   const queueStreamOperation = (operation: () => Promise<void>): void => {
+    if (signal?.aborted) {
+      return;
+    }
+
     streamSendChain = streamSendChain.then(async () => {
+      if (signal?.aborted) {
+        return;
+      }
       await operation();
     });
   };
@@ -246,7 +371,8 @@ async function processUserMessage(params: {
         "Thinking...",
         sourceMessageId,
         eventId,
-        senderOpenId
+        senderOpenId,
+        signal
       );
       if (!thinkingMessageId) {
         return;
@@ -283,7 +409,8 @@ async function processUserMessage(params: {
         normalized,
         sourceMessageId,
         eventId,
-        senderOpenId
+        senderOpenId,
+        signal
       );
 
       if (!createdMessageId) {
@@ -298,7 +425,8 @@ async function processUserMessage(params: {
       state.messageId,
       normalized,
       eventId,
-      senderOpenId
+      senderOpenId,
+      signal
     );
   };
 
@@ -488,6 +616,10 @@ async function processUserMessage(params: {
   };
 
   const onStreamEvent = (event: OpenCodeEvent): void => {
+    if (signal?.aborted) {
+      return;
+    }
+
     if (event.type === "step_start") {
       const stepKey = openStep(event);
       latestStepKey = stepKey;
@@ -542,8 +674,13 @@ async function processUserMessage(params: {
       sessionId: previousSessionId,
       model: config.opencodeModel,
       timeoutMs: config.opencodeTimeoutMs,
-      onEvent: onStreamEvent
+      onEvent: onStreamEvent,
+      signal
     });
+
+    if (signal?.aborted) {
+      return;
+    }
 
     sessionByUser.set(senderOpenId, result.sessionId);
     console.log(
@@ -556,20 +693,54 @@ async function processUserMessage(params: {
     await streamSendChain;
 
     if (!streamedConcreteOutput) {
-      await safeReplyText(chatId, result.text, sourceMessageId, eventId, senderOpenId);
+      if (signal?.aborted) {
+        return;
+      }
+      await safeReplyText(chatId, result.text, sourceMessageId, eventId, senderOpenId, signal);
       return;
     }
   } catch (error) {
+    if (isAbortError(error) || signal?.aborted) {
+      console.log(
+        `[opencode]: aborted open_id=${senderOpenId} event_id=${eventId ?? "unknown"} message_id=${sourceMessageId ?? "unknown"}`
+      );
+      return;
+    }
+
     const errorMessage =
       error instanceof Error && error.message
         ? error.message
         : "调用 OpenCode 失败，请稍后重试。";
     console.error(`[opencode]: failed open_id=${senderOpenId}`, error);
-    await safeReplyText(chatId, `处理失败：${errorMessage}`, sourceMessageId, eventId, senderOpenId);
+    await safeReplyText(chatId, `处理失败：${errorMessage}`, sourceMessageId, eventId, senderOpenId, signal);
   }
 }
 
 const eventDispatcher = new Lark.EventDispatcher({}).register({
+  "im.message.recalled_v1": async (data) => {
+    const eventId = data.event_id;
+    const now = Date.now();
+    cleanupHandledEvents(now);
+
+    if (eventId && handledEvents.has(eventId)) {
+      console.log(`[feishu]: skip duplicated event_id=${eventId}`);
+      return;
+    }
+
+    if (eventId) {
+      handledEvents.set(eventId, now);
+    }
+
+    const messageId = data.message_id;
+    if (!messageId) {
+      return;
+    }
+
+    const result = handleMessageRecalled(messageId);
+    console.log(
+      `[feishu]: recalled event_id=${eventId ?? "unknown"} message_id=${messageId} aborted=${result.aborted} removed=${result.removed}`
+    );
+  },
   "im.message.receive_v1": async (data) => {
     const eventId = data.event_id;
     const now = Date.now();
@@ -660,8 +831,8 @@ const eventDispatcher = new Lark.EventDispatcher({}).register({
       return;
     }
 
-    enqueueUserMessage(senderOpenId, async () => {
-      await processUserMessage({ chatId, sourceMessageId, senderOpenId, text, eventId });
+    enqueueUserMessage(senderOpenId, sourceMessageId, async (signal) => {
+      await processUserMessage({ chatId, sourceMessageId, senderOpenId, text, eventId, signal });
     });
   }
 });
