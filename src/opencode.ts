@@ -9,13 +9,72 @@ type OpenCodeEvent = {
   };
 };
 
+type ServeConfig = {
+  hostname: string;
+  port: number;
+  password: string;
+};
+
+let serveProcess: ReturnType<typeof spawn> | null = null;
+let serveStartPromise: Promise<void> | null = null;
+let currentServeConfig: ServeConfig | null = null;
+
+function buildServeUrl(config: ServeConfig): string {
+  return `http://${config.hostname}:${config.port}`;
+}
+
+export async function initOpenCodeServe(config: ServeConfig): Promise<void> {
+  currentServeConfig = config;
+
+  if (serveProcess && !serveProcess.killed) {
+    return;
+  }
+
+  if (serveStartPromise) {
+    await serveStartPromise;
+    return;
+  }
+
+  serveStartPromise = startServeProcess(config);
+  await serveStartPromise;
+}
+
+export async function stopOpenCodeServe(): Promise<void> {
+  if (!serveProcess || serveProcess.killed) {
+    return;
+  }
+
+  const processToStop = serveProcess;
+  await new Promise<void>((resolve) => {
+    const timeout = setTimeout(() => {
+      if (!processToStop.killed) {
+        processToStop.kill("SIGKILL");
+      }
+    }, 5000);
+
+    processToStop.once("close", () => {
+      clearTimeout(timeout);
+      resolve();
+    });
+
+    processToStop.kill("SIGTERM");
+  });
+}
+
 export async function askOpenCode(params: {
   message: string;
   sessionId?: string;
   model?: string;
   timeoutMs: number;
 }): Promise<{ text: string; sessionId: string }> {
-  const args = ["run", "--format", "json"];
+  if (!currentServeConfig) {
+    throw new Error("OpenCode serve 未初始化，请先调用 initOpenCodeServe。");
+  }
+
+  await initOpenCodeServe(currentServeConfig);
+
+  const serveUrl = buildServeUrl(currentServeConfig);
+  const args = ["run", "--format", "json", "--attach", serveUrl, "--password", currentServeConfig.password];
 
   if (params.sessionId) {
     args.push("--session", params.sessionId);
@@ -27,7 +86,11 @@ export async function askOpenCode(params: {
 
   args.push(params.message);
 
-  const { stdout, stderr, code, signal, timedOut } = await runCommand(args, params.timeoutMs);
+  const { stdout, stderr, code, signal, timedOut } = await runCommand(
+    args,
+    params.timeoutMs,
+    currentServeConfig.password
+  );
 
   if (code !== 0) {
     const stderrText = stderr.trim();
@@ -86,14 +149,105 @@ export async function askOpenCode(params: {
   };
 }
 
+async function startServeProcess(config: ServeConfig): Promise<void> {
+  const args = [
+    "serve",
+    "--hostname",
+    config.hostname,
+    "--port",
+    String(config.port)
+  ];
+
+  const child = spawn("opencode", args, {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      OPENCODE_SERVER_PASSWORD: config.password
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+
+  serveProcess = child;
+
+  const prefix = `[opencode-serve ${config.hostname}:${config.port}]`;
+
+  child.stdout.on("data", (chunk: Buffer) => {
+    const message = chunk.toString("utf8").trim();
+    if (message) {
+      console.log(`${prefix} ${message}`);
+    }
+  });
+
+  child.stderr.on("data", (chunk: Buffer) => {
+    const message = chunk.toString("utf8").trim();
+    if (message) {
+      console.error(`${prefix} ${message}`);
+    }
+  });
+
+  child.once("exit", (code, signal) => {
+    console.error(`${prefix} exited code=${String(code)} signal=${signal ?? "none"}`);
+    if (serveProcess === child) {
+      serveProcess = null;
+      serveStartPromise = null;
+    }
+  });
+
+  child.once("error", (error) => {
+    console.error(`${prefix} failed`, error);
+  });
+
+  try {
+    await waitForServeReady(config);
+    console.log(`${prefix} ready`);
+  } catch (error) {
+    if (!child.killed) {
+      child.kill("SIGTERM");
+    }
+    serveProcess = null;
+    serveStartPromise = null;
+    throw error;
+  }
+}
+
+async function waitForServeReady(config: ServeConfig): Promise<void> {
+  const serveUrl = buildServeUrl(config);
+  const maxAttempts = 30;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const probe = await runCommand(
+      ["run", "--format", "json", "--attach", serveUrl, "--password", config.password, "ping"],
+      8000,
+      config.password
+    );
+    if (probe.code === 0) {
+      return;
+    }
+
+    await sleep(300);
+  }
+
+  throw new Error("OpenCode serve 启动超时，请检查本地端口或模型配置。");
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
 async function runCommand(
   args: string[],
-  timeoutMs: number
+  timeoutMs: number,
+  password?: string
 ): Promise<{ stdout: string; stderr: string; code: number | null; signal: NodeJS.Signals | null; timedOut: boolean }> {
   return await new Promise((resolve, reject) => {
     const child = spawn("opencode", args, {
       cwd: process.cwd(),
-      env: process.env,
+      env: {
+        ...process.env,
+        ...(password ? { OPENCODE_SERVER_PASSWORD: password } : {})
+      },
       stdio: ["pipe", "pipe", "pipe"]
     });
 

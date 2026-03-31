@@ -1,4 +1,5 @@
 import dotenv from "dotenv";
+import { randomBytes } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { z } from "zod";
@@ -10,7 +11,10 @@ const schema = z.object({
   FEISHU_APP_SECRET: z.string().min(1),
   ALLOWED_OPEN_ID: z.string().optional(),
   OPENCODE_MODEL: z.string().optional(),
-  OPENCODE_TIMEOUT_MS: z.coerce.number().int().positive().default(300000)
+  OPENCODE_TIMEOUT_MS: z.coerce.number().int().positive().default(300000),
+  OPENCODE_SERVE_HOST: z.string().min(1).default("127.0.0.1"),
+  OPENCODE_SERVE_PORT: z.coerce.number().int().min(1).max(65535).default(4096),
+  OPENCODE_SERVER_PASSWORD: z.string().optional()
 });
 
 const parsed = schema.safeParse(process.env);
@@ -29,6 +33,17 @@ const allowedOpenIds = new Set(
     .map((item) => item.trim())
     .filter(Boolean)
 );
+
+const opencodeServerPassword =
+  parsed.data.OPENCODE_SERVER_PASSWORD && parsed.data.OPENCODE_SERVER_PASSWORD.trim().length > 0
+    ? parsed.data.OPENCODE_SERVER_PASSWORD.trim()
+    : randomBytes(18).toString("hex");
+
+if (!parsed.data.OPENCODE_SERVER_PASSWORD || parsed.data.OPENCODE_SERVER_PASSWORD.trim().length === 0) {
+  console.warn("OPENCODE_SERVER_PASSWORD 为空，已使用随机字符串作为当前进程密码。");
+}
+
+process.env.OPENCODE_SERVER_PASSWORD = opencodeServerPassword;
 
 function updateEnvValue(content: string, key: string, value: string): string {
   const pattern = new RegExp(`^${key}=.*$`, "m");
@@ -72,5 +87,8 @@ export const config = {
   appSecret: parsed.data.FEISHU_APP_SECRET,
   allowedOpenIds,
   opencodeModel: parsed.data.OPENCODE_MODEL?.trim() || undefined,
-  opencodeTimeoutMs: parsed.data.OPENCODE_TIMEOUT_MS
+  opencodeTimeoutMs: parsed.data.OPENCODE_TIMEOUT_MS,
+  opencodeServeHost: parsed.data.OPENCODE_SERVE_HOST,
+  opencodeServePort: parsed.data.OPENCODE_SERVE_PORT,
+  opencodeServerPassword
 };

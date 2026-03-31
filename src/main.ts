@@ -1,7 +1,7 @@
 import * as Lark from "@larksuiteoapi/node-sdk";
 import { randomBytes } from "node:crypto";
 import { config, persistAllowedOpenId } from "./config";
-import { askOpenCode } from "./opencode";
+import { askOpenCode, initOpenCodeServe, stopOpenCodeServe } from "./opencode";
 
 const client = new Lark.Client({
   appId: config.appId,
@@ -243,6 +243,11 @@ const eventDispatcher = new Lark.EventDispatcher({}).register({
 });
 
 async function bootstrap(): Promise<void> {
+  await initOpenCodeServe({
+    hostname: config.opencodeServeHost,
+    port: config.opencodeServePort,
+    password: config.opencodeServerPassword
+  });
   await wsClient.start({ eventDispatcher });
   console.log("飞书长连接已启动，等待消息...");
 }
@@ -253,8 +258,9 @@ bootstrap().catch((error) => {
 });
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
-  process.on(signal, () => {
+  process.on(signal, async () => {
     wsClient.close();
+    await stopOpenCodeServe();
     process.exit(0);
   });
 }
