@@ -29,6 +29,8 @@ const allowedOpenIds = new Set(config.allowedOpenIds);
 const sessionByUser = new Map<string, string>();
 const modelByUser = new Map<string, string>();
 const pendingTokens = new Map<string, { token: string; expiresAt: number }>();
+let isOpenCodeReady = false;
+let opencodeReadyPromise: Promise<void> | undefined;
 type UserQueueTask = (signal: AbortSignal) => Promise<void>;
 
 type UserQueueItem = {
@@ -82,6 +84,11 @@ async function drainUserQueue(openId: string, state: UserQueueState): Promise<vo
     state.activeItem = current;
 
     try {
+      if (!isOpenCodeReady && opencodeReadyPromise) {
+        console.log(`[queue]: action=waiting_opencode open_id=${openId}`);
+        await opencodeReadyPromise;
+      }
+
       if (!current.controller.signal.aborted) {
         await current.task(current.controller.signal);
       }
@@ -1108,13 +1115,18 @@ const eventDispatcher = new Lark.EventDispatcher({}).register({
 });
 
 async function bootstrap(): Promise<void> {
-  await initOpenCodeServe({
+  await wsClient.start({ eventDispatcher });
+  console.log("飞书长连接已启动，等待消息...");
+
+  opencodeReadyPromise = initOpenCodeServe({
     hostname: config.opencodeServeHost,
     port: config.opencodeServePort,
     password: config.opencodeServerPassword
   });
-  await wsClient.start({ eventDispatcher });
-  console.log("飞书长连接已启动，等待消息...");
+  await opencodeReadyPromise;
+  isOpenCodeReady = true;
+
+  console.log("OpenCode 已就绪，开始处理队列与新消息...");
 }
 
 bootstrap().catch((error) => {
