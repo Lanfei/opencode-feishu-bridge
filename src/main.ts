@@ -216,15 +216,26 @@ function getOrCreatePendingToken(openId: string): { token: string; expiresAt: nu
   return created;
 }
 
+function buildMarkdownContent(text: string): string {
+  return JSON.stringify({
+    zh_cn: {
+      title: "",
+      content: [[{ tag: "md", text }]]
+    }
+  });
+}
+
 async function replyText(chatId: string, text: string, replyToMessageId?: string): Promise<string | undefined> {
+  const content = buildMarkdownContent(text);
+
   if (replyToMessageId) {
     const result = await client.im.v1.message.reply({
       path: {
         message_id: replyToMessageId
       },
       data: {
-        msg_type: "text",
-        content: JSON.stringify({ text })
+        msg_type: "post",
+        content
       }
     });
 
@@ -237,8 +248,8 @@ async function replyText(chatId: string, text: string, replyToMessageId?: string
     },
     data: {
       receive_id: chatId,
-      msg_type: "text",
-      content: JSON.stringify({ text })
+      msg_type: "post",
+      content
     }
   });
 
@@ -281,13 +292,15 @@ async function safeReplyText(
 }
 
 async function updateTextMessage(messageId: string, text: string): Promise<void> {
+  const content = buildMarkdownContent(text);
+
   await client.im.v1.message.update({
     path: {
       message_id: messageId
     },
     data: {
-      msg_type: "text",
-      content: JSON.stringify({ text })
+      msg_type: "post",
+      content
     }
   });
 }
