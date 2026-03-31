@@ -33,6 +33,7 @@ npm run dev
 2. 用户向机器人发送该 token（需完全匹配）后，当前 `open_id` 会自动写入 `.env` 的 `ALLOWED_OPEN_ID`。
 3. 完成授权后发送消息，机器人会返回 OpenCode 的回答。
 4. 如需清空上下文，发送 `/reset` 或 `/new`。
+5. 如需查看可恢复会话，发送 `/resume`；如需切换到某个会话，发送 `/resume <编号|session_id>`。
 
 ## 4. 飞书后台最小配置
 

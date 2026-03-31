@@ -5,6 +5,7 @@ import {
   askOpenCode,
   initOpenCodeServe,
   isAbortError,
+  listOpenCodeSessions,
   OpenCodeEvent,
   stopOpenCodeServe
 } from "./opencode";
@@ -44,6 +45,7 @@ const DEDUPE_TTL_MS = 10 * 60 * 1000;
 const TOKEN_TTL_MS = 10 * 60 * 1000;
 const RESET_COMMAND = "/reset";
 const NEW_COMMAND = "/new";
+const RESUME_COMMAND = "/resume";
 
 function getOrCreateQueueState(openId: string): UserQueueState {
   const existed = userMessageQueues.get(openId);
@@ -168,6 +170,29 @@ function parseTextContent(content: string): string {
   } catch {
     return "";
   }
+}
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function parseResumeCommand(text: string): { isResume: boolean; sessionId?: string } {
+  const trimmed = text.trim();
+  const resumePattern = new RegExp(`^${escapeRegExp(RESUME_COMMAND)}(?:\\s+(.+))?$`);
+  const matched = trimmed.match(resumePattern);
+  if (!matched) {
+    return { isResume: false };
+  }
+
+  const rawArg = matched[1]?.trim();
+  if (!rawArg) {
+    return { isResume: true };
+  }
+
+  return {
+    isResume: true,
+    sessionId: rawArg.split(/\s+/)[0]
+  };
 }
 
 function generateTempToken(): string {
@@ -319,6 +344,69 @@ async function processUserMessage(params: {
     sessionByUser.delete(senderOpenId);
     await safeReplyText(chatId, "上下文已重置。接下来会开启新会话。", sourceMessageId, eventId, senderOpenId, signal);
     return;
+  }
+
+  const resume = parseResumeCommand(text);
+  if (resume.isResume) {
+    try {
+      const sessions = await listOpenCodeSessions(15);
+
+      if (!resume.sessionId) {
+        if (sessions.length === 0) {
+          await safeReplyText(chatId, "当前没有可用的 OpenCode session。", sourceMessageId, eventId, senderOpenId, signal);
+          return;
+        }
+
+        const lines = sessions.map((session, index) => {
+          const title = session.title?.trim() ? session.title.trim() : "(无标题)";
+          const updatedAt = session.updated ? new Date(session.updated).toLocaleString("zh-CN", { hour12: false }) : "unknown";
+          return `${String(index + 1)}. ${session.id} | ${title} | ${updatedAt}`;
+        });
+
+        await safeReplyText(
+          chatId,
+          `可用 session（最近 ${String(sessions.length)} 条）：\n${lines.join("\n")}\n\n使用方式：/resume <编号|session_id>`,
+          sourceMessageId,
+          eventId,
+          senderOpenId,
+          signal
+        );
+        return;
+      }
+
+      const resumeKey = resume.sessionId.trim();
+      const indexMatch = /^\d+$/.test(resumeKey) ? Number(resumeKey) : NaN;
+      const targetByIndex = Number.isInteger(indexMatch) && indexMatch >= 1 ? sessions[indexMatch - 1] : undefined;
+      const target = targetByIndex ?? sessions.find((session) => session.id === resumeKey);
+      if (!target) {
+        await safeReplyText(
+          chatId,
+          `未找到 session: ${resume.sessionId}\n请先发送 /resume 查看可用会话。`,
+          sourceMessageId,
+          eventId,
+          senderOpenId,
+          signal
+        );
+        return;
+      }
+
+      sessionByUser.set(senderOpenId, target.id);
+      const title = target.title?.trim() ? target.title.trim() : "(无标题)";
+      await safeReplyText(
+        chatId,
+        `已恢复 session: ${target.id}\n标题：${title}`,
+        sourceMessageId,
+        eventId,
+        senderOpenId,
+        signal
+      );
+      return;
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error && error.message ? error.message : "查询 session 失败，请稍后再试。";
+      await safeReplyText(chatId, `处理失败：${errorMessage}`, sourceMessageId, eventId, senderOpenId, signal);
+      return;
+    }
   }
 
   const previousSessionId = sessionByUser.get(senderOpenId);

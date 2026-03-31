@@ -35,6 +35,15 @@ export type OpenCodeEvent = {
   };
 };
 
+export type OpenCodeSession = {
+  id: string;
+  title?: string;
+  updated?: number;
+  created?: number;
+  projectId?: string;
+  directory?: string;
+};
+
 type ServeConfig = {
   hostname: string;
   port: number;
@@ -175,6 +184,57 @@ export async function askOpenCode(params: {
     text,
     sessionId: resolvedSessionId
   };
+}
+
+export async function listOpenCodeSessions(maxCount = 10): Promise<OpenCodeSession[]> {
+  const safeCount = Number.isFinite(maxCount) ? Math.max(1, Math.floor(maxCount)) : 10;
+  const args = ["session", "list", "--format", "json", "-n", String(safeCount)];
+  const { stdout, stderr, code, signal, timedOut } = await runCommand(args, 15000);
+
+  if (code !== 0) {
+    const stderrText = stderr.trim();
+    const stdoutText = stdout.trim();
+    const reason = [
+      `code=${String(code)}`,
+      signal ? `signal=${signal}` : "",
+      stderrText ? `stderr=${stderrText}` : "",
+      !stderrText && stdoutText ? `stdout=${stdoutText}` : ""
+    ]
+      .filter(Boolean)
+      .join(" | ");
+    const timeoutHint = timedOut ? " | 可能超时" : "";
+    throw new Error(`查询 OpenCode 会话失败: ${reason || "未知错误"}${timeoutHint}`);
+  }
+
+  const parsed = JSON.parse(stdout) as unknown;
+  if (!Array.isArray(parsed)) {
+    return [];
+  }
+
+  const sessions: OpenCodeSession[] = [];
+
+  for (const item of parsed) {
+    if (!item || typeof item !== "object") {
+      continue;
+    }
+
+    const record = item as Record<string, unknown>;
+    const id = typeof record.id === "string" ? record.id : "";
+    if (!id) {
+      continue;
+    }
+
+    sessions.push({
+      id,
+      title: typeof record.title === "string" ? record.title : undefined,
+      updated: typeof record.updated === "number" ? record.updated : undefined,
+      created: typeof record.created === "number" ? record.created : undefined,
+      projectId: typeof record.projectId === "string" ? record.projectId : undefined,
+      directory: typeof record.directory === "string" ? record.directory : undefined
+    });
+  }
+
+  return sessions;
 }
 
 async function startServeProcess(config: ServeConfig): Promise<void> {
