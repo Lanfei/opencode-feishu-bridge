@@ -191,7 +191,7 @@ export async function askOpenCode(params: {
       .filter(Boolean)
       .join(" | ");
 
-    const timeoutHint = timedOut ? ` | 可能超时（当前超时=${params.timeoutMs}ms）` : "";
+    const timeoutHint = timedOut ? ` | 可能超时（当前超时=${String(Math.ceil(params.timeoutMs / 1000))}s）` : "";
     throw new Error(`OpenCode 命令执行失败: ${reason || "未知错误"}${timeoutHint}`);
   }
 

@@ -12,7 +12,7 @@ const schema = z.object({
   FEISHU_APP_SECRET: z.string().min(1),
   ALLOWED_OPEN_ID: z.string().optional(),
   OPENCODE_MODEL: z.string().optional(),
-  OPENCODE_TIMEOUT_MS: z.coerce.number().int().positive().default(300000),
+  OPENCODE_TIMEOUT: z.coerce.number().int().positive().default(300),
   OPENCODE_WORKDIR: z.preprocess(
     (value) => (typeof value === "string" && value.trim().length === 0 ? undefined : value),
     z.string().trim().min(1).default(homedir())
@@ -49,6 +49,8 @@ const allowedOpenIds = new Set(
     .map((item) => item.trim())
     .filter(Boolean)
 );
+
+const opencodeTimeoutMs = parsed.data.OPENCODE_TIMEOUT * 1000;
 
 const opencodeServerPassword =
   parsed.data.OPENCODE_SERVER_PASSWORD && parsed.data.OPENCODE_SERVER_PASSWORD.trim().length > 0
@@ -130,7 +132,7 @@ export const config = {
   appSecret: parsed.data.FEISHU_APP_SECRET,
   allowedOpenIds,
   opencodeModel: parsed.data.OPENCODE_MODEL?.trim() || undefined,
-  opencodeTimeoutMs: parsed.data.OPENCODE_TIMEOUT_MS,
+  opencodeTimeoutMs,
   opencodeWorkdir,
   opencodeServeHost: parsed.data.OPENCODE_SERVE_HOST,
   opencodeServePort: parsed.data.OPENCODE_SERVE_PORT,

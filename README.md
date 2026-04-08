@@ -16,7 +16,7 @@ npm install
 - `FEISHU_APP_SECRET`: 飞书应用 App Secret
 - `ALLOWED_OPEN_ID`: 已授权用户的 open_id 列表（逗号分隔，用户验证成功后会自动写入）
 - `OPENCODE_MODEL`: 可选，指定模型（如 `openai/gpt-5.3-codex`）
-- `OPENCODE_TIMEOUT_MS`: 可选，OpenCode 超时时间（默认 `300000`）
+- `OPENCODE_TIMEOUT`: 可选，OpenCode 超时时间（单位秒，默认 `300`）
 - `OPENCODE_WORKDIR`: 可选，OpenCode 新会话的默认工作目录（默认用户根目录）
 - `OPENCODE_SERVE_HOST`: OpenCode serve 绑定地址（默认 `127.0.0.1`）
 - `OPENCODE_SERVE_PORT`: OpenCode serve 端口（默认 `4096`）
