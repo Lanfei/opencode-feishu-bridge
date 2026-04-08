@@ -4,7 +4,7 @@
 
 ## 运行方式
 
-方式一：全局安装
+### 方式一：全局安装
 
 ```bash
 npm i -g opencode-feishu-bridge
@@ -23,7 +23,7 @@ ofbs
 ofbc
 ```
 
-方式二：直接使用 npx（无需安装）
+### 方式二：直接使用 npx（无需安装）
 
 ```bash
 npx --package opencode-feishu-bridge ofbs
@@ -43,7 +43,7 @@ npx --package opencode-feishu-bridge ofbc
 3. 发送消息后，机器人会返回 OpenCode 的回答。
 4. 如需清空上下文，发送 `/reset` 或 `/new`；如需新会话切到指定目录，发送 `/new <工作目录>`。
 5. 如需停止当前任务并清空当前用户队列，发送 `/stop`。
-6. 如需查看可恢复会话，发送 `/resume`；如需切换到某个会话，发送 `/resume <编号|session_id>`。
+6. 如需查看可恢复会话，发送 `/session`；如需切换到某个会话，发送 `/session <编号|session_id>`。
 7. 如需查看已配置 provider 的可用模型，发送 `/models`。
 8. 如需查看当前会话最近使用模型，发送 `/model`；如需切换模型，发送 `/model <model_id>`。
 

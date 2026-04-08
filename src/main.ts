@@ -54,7 +54,7 @@ const DEDUPE_TTL_MS = 10 * 60 * 1000;
 const RESET_COMMAND = "/reset";
 const NEW_COMMAND = "/new";
 const STOP_COMMAND = "/stop";
-const RESUME_COMMAND = "/resume";
+const SESSION_COMMAND = "/session";
 const MODELS_COMMAND = "/models";
 const MODEL_COMMAND = "/model";
 
@@ -208,7 +208,7 @@ function escapeRegExp(text: string): string {
 
 function parseResumeCommand(text: string): { isResume: boolean; sessionId?: string } {
   const trimmed = text.trim();
-  const resumePattern = new RegExp(`^${escapeRegExp(RESUME_COMMAND)}(?:\\s+(.+))?$`);
+  const resumePattern = new RegExp(`^${escapeRegExp(SESSION_COMMAND)}(?:\\s+(.+))?$`);
   const matched = trimmed.match(resumePattern);
   if (!matched) {
     return { isResume: false };
@@ -639,13 +639,12 @@ async function processUserMessage(params: {
         const lines = sessions.map((session, index) => {
           const title = session.title?.trim() ? session.title.trim() : "(无标题)";
           const updatedAt = session.updated ? new Date(session.updated).toLocaleString("zh-CN", { hour12: false }) : "unknown";
-          const directory = session.directory?.trim() || "unknown";
-          return `${String(index + 1)}. ${session.id} | ${title} | ${updatedAt} | ${directory}`;
+          return `${String(index + 1)}. ${session.id} | ${title} | ${updatedAt}`;
         });
 
         await safeReplyText(
           chatId,
-          `可用 session（最近 ${String(sessions.length)} 条）：\n${lines.join("\n")}\n\n使用方式：/resume <编号|session_id>`,
+          `可用 session（最近 ${String(sessions.length)} 条）：\n${lines.join("\n")}\n\n使用方式：/session <编号|session_id>`,
           sourceMessageId,
           eventId,
           senderOpenId,
@@ -661,7 +660,7 @@ async function processUserMessage(params: {
       if (!target) {
         await safeReplyText(
           chatId,
-          `未找到 session: ${resume.sessionId}\n请先发送 /resume 查看可用会话。`,
+          `未找到 session: ${resume.sessionId}\n请先发送 /session 查看可用会话。`,
           sourceMessageId,
           eventId,
           senderOpenId,
@@ -688,7 +687,7 @@ async function processUserMessage(params: {
       const title = target.title?.trim() ? target.title.trim() : "(无标题)";
       await safeReplyText(
         chatId,
-        `已恢复 session: ${target.id}\n标题：${title}\n工作目录：${workdirCheck.workdir}`,
+        `已恢复 session: ${target.id}\n标题：${title}`,
         sourceMessageId,
         eventId,
         senderOpenId,
