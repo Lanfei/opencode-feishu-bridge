@@ -1,13 +1,13 @@
 {
   "name": "opencode-feishu-bridge",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Feishu bridge for OpenCode",
   "main": "dist/main.js",
   "files": [
     "dist",
     "bin",
     "README.md",
-    ".env.example"
+    "config.example.json"
   ],
   "bin": {
     "opencode-feishu-bridge": "bin/opencode-attach.js",
@@ -39,7 +39,6 @@
   "type": "commonjs",
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.60.0",
-    "dotenv": "^17.3.1",
     "zod": "^4.3.6"
   },
   "devDependencies": {

@@ -1220,7 +1220,7 @@ const eventDispatcher = new Lark.EventDispatcher({}).register({
     if (!allowAllOpenIds && !allowedOpenIds.has(senderOpenId)) {
       await safeReplyText(
         chatId,
-        `当前用户未授权。你的 open_id：${senderOpenId}。请联系管理员将该 open_id 加入 ALLOWED_OPEN_ID。`,
+        `当前用户未授权。你的 open_id：${senderOpenId}。请联系管理员将该 open_id 加入 allowedOpenId。`,
         sourceMessageId,
         eventId,
         senderOpenId

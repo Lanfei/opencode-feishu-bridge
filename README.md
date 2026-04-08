@@ -8,18 +8,25 @@
 npm install
 ```
 
-## 2. 配置环境变量
+## 2. 配置文件
 
-复制 `.env.example` 为 `.env` 并填写：
+复制 `config.example.json` 到 `~/.config/opencode/feishu-bridge/config.json` 并填写：
 
-- `FEISHU_APP_ID`: 飞书应用 App ID
-- `FEISHU_APP_SECRET`: 飞书应用 App Secret
-- `ALLOWED_OPEN_ID`: 已授权用户的 open_id 列表（逗号分隔，用户验证成功后会自动写入）
-- `OPENCODE_MODEL`: 可选，指定模型（如 `openai/gpt-5.3-codex`）
-- `OPENCODE_TIMEOUT`: 可选，OpenCode 超时时间（单位秒，默认 `300`）
-- `OPENCODE_WORKDIR`: 可选，OpenCode 新会话的默认工作目录（默认用户根目录）
-- `OPENCODE_SERVE_HOST`: OpenCode serve 绑定地址（默认 `127.0.0.1`）
-- `OPENCODE_SERVE_PORT`: OpenCode serve 端口（默认 `4096`）
+```bash
+mkdir -p ~/.config/opencode/feishu-bridge
+cp config.example.json ~/.config/opencode/feishu-bridge/config.json
+```
+
+如果该配置文件不存在，首次启动会进入命令行交互并自动创建。
+
+- `feishuAppId`: 飞书应用 App ID
+- `feishuAppSecret`: 飞书应用 App Secret
+- `allowedOpenId`: 已授权用户的 open_id 列表，支持 JSON 数组或逗号分隔字符串
+- `opencodeModel`: 可选，指定模型（如 `openai/gpt-5.3-codex`）
+- `opencodeTimeout`: 可选，OpenCode 超时时间（单位毫秒，默认 `300000`）
+- `opencodeWorkdir`: 可选，OpenCode 新会话的默认工作目录（默认用户根目录）
+- `opencodeServeHost`: OpenCode serve 绑定地址（默认 `127.0.0.1`）
+- `opencodeServePort`: OpenCode serve 端口（默认 `4096`）
 
 ## 3. 运行方式
 
@@ -63,8 +70,8 @@ ofbs
 
 看到 `飞书长连接已启动，等待消息...` 后：
 
-1. 配置 `ALLOWED_OPEN_ID` 后，只有白名单内的用户可以使用机器人；未授权用户会收到提示。
-2. 若 `ALLOWED_OPEN_ID` 为空，则允许所有用户接入（启动时会打印安全告警日志）。
+1. 配置 `allowedOpenId` 后，只有白名单内的用户可以使用机器人；未授权用户会收到提示。
+2. 若 `allowedOpenId` 为空，则允许所有用户接入（启动时会打印安全告警日志）。
 3. 发送消息后，机器人会返回 OpenCode 的回答。
 4. 如需清空上下文，发送 `/reset` 或 `/new`；如需新会话切到指定目录，发送 `/new <工作目录>`。
 5. 如需停止当前任务并清空当前用户队列，发送 `/stop`。

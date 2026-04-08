@@ -1,0 +1,10 @@
+{
+  "feishuAppId": "cli_xxx",
+  "feishuAppSecret": "xxx",
+  "allowedOpenId": [],
+  "opencodeModel": "",
+  "opencodeTimeout": 300000,
+  "opencodeWorkdir": "",
+  "opencodeServeHost": "127.0.0.1",
+  "opencodeServePort": 4096
+}
