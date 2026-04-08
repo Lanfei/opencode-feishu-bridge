@@ -1,4 +1,4 @@
-# opencode-feishu
+# opencode-feishu-bridge
 
 飞书长连接单人机器人：基于 open_id 白名单接入，未授权用户通过临时 token 完成绑定。
 
@@ -34,6 +34,31 @@ npm run dev
 ```bash
 npm run build
 npm start
+```
+
+连接到本地 OpenCode Serve：
+
+```bash
+npm run attach
+```
+
+自定义 URL：
+
+```bash
+npm run attach -- http://127.0.0.1:5000
+```
+
+也可以作为 bin 使用：
+
+```bash
+ofbc
+ofbc http://127.0.0.1:5000
+```
+
+启动服务也可以使用 bin：
+
+```bash
+ofbs
 ```
 
 看到 `飞书长连接已启动，等待消息...` 后：

@@ -1,15 +1,39 @@
 {
-  "name": "opencode-feishu",
+  "name": "opencode-feishu-bridge",
   "version": "1.0.0",
   "description": "Feishu bridge for OpenCode",
   "main": "dist/main.js",
+  "files": [
+    "dist",
+    "bin",
+    "README.md",
+    ".env.example"
+  ],
+  "bin": {
+    "opencode-feishu-bridge": "bin/opencode-attach.js",
+    "ofbc": "bin/opencode-attach.js",
+    "ofbs": "bin/opencode-feishu-start.js"
+  },
   "scripts": {
     "dev": "tsx src/main.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/main.js",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "attach": "node ./bin/opencode-attach.js"
   },
-  "keywords": ["opencode", "feishu", "lark"],
+  "keywords": [
+    "opencode",
+    "feishu",
+    "lark"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Lanfei/opencode-feishu-bridge.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Lanfei/opencode-feishu-bridge/issues"
+  },
+  "homepage": "https://github.com/Lanfei/opencode-feishu-bridge#readme",
   "author": "",
   "license": "ISC",
   "type": "commonjs",
