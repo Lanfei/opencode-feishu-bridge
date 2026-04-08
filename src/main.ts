@@ -50,6 +50,7 @@ const DEDUPE_TTL_MS = 10 * 60 * 1000;
 const TOKEN_TTL_MS = 10 * 60 * 1000;
 const RESET_COMMAND = "/reset";
 const NEW_COMMAND = "/new";
+const STOP_COMMAND = "/stop";
 const RESUME_COMMAND = "/resume";
 const MODELS_COMMAND = "/models";
 const MODEL_COMMAND = "/model";
@@ -159,6 +160,28 @@ function handleMessageRecalled(messageId: string): { aborted: number; removed: n
   return { aborted, removed };
 }
 
+function stopUserQueue(openId: string): { aborted: boolean; removed: number } {
+  const state = userMessageQueues.get(openId);
+  if (!state) {
+    return { aborted: false, removed: 0 };
+  }
+
+  const removed = state.items.length;
+  state.items = [];
+
+  let aborted = false;
+  if (state.activeItem && !state.activeItem.controller.signal.aborted) {
+    state.activeItem.controller.abort();
+    aborted = true;
+  }
+
+  if (!state.isProcessing && !state.activeItem) {
+    userMessageQueues.delete(openId);
+  }
+
+  return { aborted, removed };
+}
+
 function cleanupHandledEvents(now: number): void {
   for (const [eventId, timestamp] of handledEvents.entries()) {
     if (now - timestamp > DEDUPE_TTL_MS) {
@@ -205,6 +228,11 @@ function parseResumeCommand(text: string): { isResume: boolean; sessionId?: stri
     isResume: true,
     sessionId: rawArg.split(/\s+/)[0]
   };
+}
+
+function isStopCommand(text: string): boolean {
+  const stopPattern = new RegExp(`^${escapeRegExp(STOP_COMMAND)}(?:\\s+)?$`);
+  return stopPattern.test(text.trim());
 }
 
 function isModelsCommand(text: string): boolean {
@@ -1105,6 +1133,18 @@ const eventDispatcher = new Lark.EventDispatcher({}).register({
         eventId,
         senderOpenId
       );
+      return;
+    }
+
+    if (isStopCommand(text)) {
+      const result = stopUserQueue(senderOpenId);
+      const detail = result.aborted
+        ? `已停止当前任务，并清空队列 ${String(result.removed)} 条待处理消息。`
+        : result.removed > 0
+          ? `当前没有运行中的任务，已清空队列 ${String(result.removed)} 条待处理消息。`
+          : "当前没有运行中的任务，队列也为空。";
+
+      await safeReplyText(chatId, detail, sourceMessageId, eventId, senderOpenId);
       return;
     }
 
