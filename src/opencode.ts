@@ -60,7 +60,6 @@ export type OpenCodeSessionModel = {
 type ServeConfig = {
   hostname: string;
   port: number;
-  password: string;
 };
 
 let serveProcess: ReturnType<typeof spawn> | null = null;
@@ -137,8 +136,6 @@ export async function askOpenCode(params: {
     "json",
     "--attach",
     serveUrl,
-    "--password",
-    currentServeConfig.password,
     "--dir",
     runWorkdir
   ];
@@ -159,7 +156,6 @@ export async function askOpenCode(params: {
   const { stdout, stderr, code, signal, timedOut, aborted } = await runCommandStreaming(
     args,
     params.timeoutMs,
-    currentServeConfig.password,
     params.signal,
     (event) => {
       params.onEvent?.(event);
@@ -535,10 +531,7 @@ async function startServeProcess(config: ServeConfig): Promise<void> {
 
   const child = spawn("opencode", args, {
     cwd: OPENCODE_DEFAULT_WORKDIR,
-    env: {
-      ...process.env,
-      OPENCODE_SERVER_PASSWORD: config.password
-    },
+    env: process.env,
     stdio: ["ignore", "pipe", "pipe"]
   });
 
@@ -597,14 +590,11 @@ async function waitForServeReady(config: ServeConfig): Promise<void> {
         "json",
         "--attach",
         serveUrl,
-        "--password",
-        config.password,
         "--dir",
         OPENCODE_DEFAULT_WORKDIR,
         "ping"
       ],
-      8000,
-      config.password
+      8000
     );
     if (probe.code === 0) {
       return;
@@ -625,16 +615,12 @@ function sleep(ms: number): Promise<void> {
 async function runCommand(
   args: string[],
   timeoutMs: number,
-  password?: string,
   workingDirectory?: string
 ): Promise<{ stdout: string; stderr: string; code: number | null; signal: NodeJS.Signals | null; timedOut: boolean }> {
   return await new Promise((resolve, reject) => {
     const child = spawn("opencode", args, {
       cwd: workingDirectory ?? OPENCODE_DEFAULT_WORKDIR,
-      env: {
-        ...process.env,
-        ...(password ? { OPENCODE_SERVER_PASSWORD: password } : {})
-      },
+      env: process.env,
       stdio: ["pipe", "pipe", "pipe"]
     });
 
@@ -677,7 +663,6 @@ async function runCommand(
 async function runCommandStreaming(
   args: string[],
   timeoutMs: number,
-  password: string,
   abortSignal: AbortSignal | undefined,
   onEvent: (event: OpenCodeEvent) => void
 ): Promise<{
@@ -691,10 +676,7 @@ async function runCommandStreaming(
   return await new Promise((resolve, reject) => {
     const child = spawn("opencode", args, {
       cwd: OPENCODE_DEFAULT_WORKDIR,
-      env: {
-        ...process.env,
-        OPENCODE_SERVER_PASSWORD: password
-      },
+      env: process.env,
       stdio: ["pipe", "pipe", "pipe"]
     });
 

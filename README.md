@@ -20,7 +20,6 @@ npm install
 - `OPENCODE_WORKDIR`: 可选，OpenCode 新会话的默认工作目录（默认用户根目录）
 - `OPENCODE_SERVE_HOST`: OpenCode serve 绑定地址（默认 `127.0.0.1`）
 - `OPENCODE_SERVE_PORT`: OpenCode serve 端口（默认 `4096`）
-- `OPENCODE_SERVER_PASSWORD`: OpenCode serve 密码（可留空，进程启动时会自动生成随机值）
 
 ## 3. 运行方式
 

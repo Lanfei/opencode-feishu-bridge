@@ -1252,8 +1252,7 @@ async function bootstrap(): Promise<void> {
 
   opencodeReadyPromise = initOpenCodeServe({
     hostname: config.opencodeServeHost,
-    port: config.opencodeServePort,
-    password: config.opencodeServerPassword
+    port: config.opencodeServePort
   });
   await opencodeReadyPromise;
   isOpenCodeReady = true;
