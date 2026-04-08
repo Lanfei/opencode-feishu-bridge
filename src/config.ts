@@ -40,7 +40,7 @@ const opencodeServerPassword =
     : randomBytes(18).toString("hex");
 
 if (!parsed.data.OPENCODE_SERVER_PASSWORD || parsed.data.OPENCODE_SERVER_PASSWORD.trim().length === 0) {
-  console.warn("OPENCODE_SERVER_PASSWORD 为空，已使用随机字符串作为当前进程密码。");
+  console.warn(`OPENCODE_SERVER_PASSWORD 为空，已使用随机字符串作为当前进程密码: ${opencodeServerPassword}`);
 }
 
 process.env.OPENCODE_SERVER_PASSWORD = opencodeServerPassword;
