@@ -1,13 +1,17 @@
 import * as Lark from "@larksuiteoapi/node-sdk";
 import { randomBytes } from "node:crypto";
+import { existsSync, statSync } from "node:fs";
+import { homedir } from "node:os";
+import { isAbsolute, resolve } from "node:path";
 import { config, persistAllowedOpenId } from "./config";
 import {
   askOpenCode,
+  getOpenCodeSessionByIdFromDb,
   getOpenCodeSessionLatestModel,
   initOpenCodeServe,
   isAbortError,
   listOpenCodeModels,
-  listOpenCodeSessions,
+  listOpenCodeSessionsFromDb,
   OpenCodeEvent,
   stopOpenCodeServe
 } from "./opencode";
@@ -28,6 +32,7 @@ const handledEvents = new Map<string, number>();
 const allowedOpenIds = new Set(config.allowedOpenIds);
 const sessionByUser = new Map<string, string>();
 const modelByUser = new Map<string, string>();
+const workdirByUser = new Map<string, string>();
 const pendingTokens = new Map<string, { token: string; expiresAt: number }>();
 let isOpenCodeReady = false;
 let opencodeReadyPromise: Promise<void> | undefined;
@@ -233,6 +238,86 @@ function parseResumeCommand(text: string): { isResume: boolean; sessionId?: stri
 function isStopCommand(text: string): boolean {
   const stopPattern = new RegExp(`^${escapeRegExp(STOP_COMMAND)}(?:\\s+)?$`);
   return stopPattern.test(text.trim());
+}
+
+function parseNewCommand(text: string): { isNew: boolean; workdir?: string } {
+  const trimmed = text.trim();
+  const newPattern = new RegExp(`^${escapeRegExp(NEW_COMMAND)}(?:\\s+(.+))?$`);
+  const matched = trimmed.match(newPattern);
+  if (!matched) {
+    return { isNew: false };
+  }
+
+  const rawArg = matched[1]?.trim();
+  if (!rawArg) {
+    return { isNew: true };
+  }
+
+  return {
+    isNew: true,
+    workdir: rawArg
+  };
+}
+
+function getCurrentWorkdir(openId: string): string {
+  return workdirByUser.get(openId) ?? config.opencodeWorkdir;
+}
+
+function normalizeWorkdirInput(input: string): string {
+  if (input === "~") {
+    return homedir();
+  }
+
+  if (input.startsWith("~/")) {
+    return resolve(homedir(), input.slice(2));
+  }
+
+  return input;
+}
+
+function resolveWorkdirInput(input: string, baseDirectory: string): { ok: true; workdir: string } | { ok: false; reason: string } {
+  const normalized = normalizeWorkdirInput(input.trim());
+  if (!normalized) {
+    return { ok: false, reason: "目录不能为空。" };
+  }
+
+  const candidate = isAbsolute(normalized) ? resolve(normalized) : resolve(baseDirectory, normalized);
+  if (!existsSync(candidate)) {
+    return { ok: false, reason: `目录不存在：${candidate}` };
+  }
+
+  try {
+    const stat = statSync(candidate);
+    if (!stat.isDirectory()) {
+      return { ok: false, reason: `不是目录：${candidate}` };
+    }
+  } catch {
+    return { ok: false, reason: `无法访问目录：${candidate}` };
+  }
+
+  return { ok: true, workdir: candidate };
+}
+
+function validateExistingWorkdir(directory: string): { ok: true; workdir: string } | { ok: false; reason: string } {
+  const workdir = directory.trim();
+  if (!workdir) {
+    return { ok: false, reason: "该会话未记录工作目录。" };
+  }
+
+  if (!existsSync(workdir)) {
+    return { ok: false, reason: `会话工作目录不存在：${workdir}` };
+  }
+
+  try {
+    const stat = statSync(workdir);
+    if (!stat.isDirectory()) {
+      return { ok: false, reason: `会话工作目录不是目录：${workdir}` };
+    }
+  } catch {
+    return { ok: false, reason: `会话工作目录不可访问：${workdir}` };
+  }
+
+  return { ok: true, workdir };
 }
 
 function isModelsCommand(text: string): boolean {
@@ -443,10 +528,64 @@ async function processUserMessage(params: {
     return;
   }
 
-  if (text === RESET_COMMAND || text === NEW_COMMAND) {
+  const newCommand = parseNewCommand(text);
+
+  if (text === RESET_COMMAND || newCommand.isNew) {
+    if (text === RESET_COMMAND) {
+      sessionByUser.delete(senderOpenId);
+      modelByUser.delete(senderOpenId);
+      workdirByUser.delete(senderOpenId);
+      await safeReplyText(
+        chatId,
+        "上下文已重置。接下来会开启新会话（默认工作目录）。",
+        sourceMessageId,
+        eventId,
+        senderOpenId,
+        signal
+      );
+      return;
+    }
+
+    if (!newCommand.workdir) {
+      sessionByUser.delete(senderOpenId);
+      modelByUser.delete(senderOpenId);
+      workdirByUser.delete(senderOpenId);
+      await safeReplyText(
+        chatId,
+        `上下文已重置。接下来会开启新会话。\n工作目录：${config.opencodeWorkdir}`,
+        sourceMessageId,
+        eventId,
+        senderOpenId,
+        signal
+      );
+      return;
+    }
+
+    const baseDirectory = getCurrentWorkdir(senderOpenId);
+    const resolvedWorkdir = resolveWorkdirInput(newCommand.workdir, baseDirectory);
+    if (!resolvedWorkdir.ok) {
+      await safeReplyText(
+        chatId,
+        `处理失败：${resolvedWorkdir.reason}\n使用方式：/new <工作目录>` ,
+        sourceMessageId,
+        eventId,
+        senderOpenId,
+        signal
+      );
+      return;
+    }
+
     sessionByUser.delete(senderOpenId);
     modelByUser.delete(senderOpenId);
-    await safeReplyText(chatId, "上下文已重置。接下来会开启新会话。", sourceMessageId, eventId, senderOpenId, signal);
+    workdirByUser.set(senderOpenId, resolvedWorkdir.workdir);
+    await safeReplyText(
+      chatId,
+      `上下文已重置。接下来会开启新会话。\n工作目录：${resolvedWorkdir.workdir}`,
+      sourceMessageId,
+      eventId,
+      senderOpenId,
+      signal
+    );
     return;
   }
 
@@ -520,7 +659,7 @@ async function processUserMessage(params: {
   const resume = parseResumeCommand(text);
   if (resume.isResume) {
     try {
-      const sessions = await listOpenCodeSessions(15);
+      const sessions = await listOpenCodeSessionsFromDb(30);
 
       if (!resume.sessionId) {
         if (sessions.length === 0) {
@@ -531,7 +670,8 @@ async function processUserMessage(params: {
         const lines = sessions.map((session, index) => {
           const title = session.title?.trim() ? session.title.trim() : "(无标题)";
           const updatedAt = session.updated ? new Date(session.updated).toLocaleString("zh-CN", { hour12: false }) : "unknown";
-          return `${String(index + 1)}. ${session.id} | ${title} | ${updatedAt}`;
+          const directory = session.directory?.trim() || "unknown";
+          return `${String(index + 1)}. ${session.id} | ${title} | ${updatedAt} | ${directory}`;
         });
 
         await safeReplyText(
@@ -548,7 +688,7 @@ async function processUserMessage(params: {
       const resumeKey = resume.sessionId.trim();
       const indexMatch = /^\d+$/.test(resumeKey) ? Number(resumeKey) : NaN;
       const targetByIndex = Number.isInteger(indexMatch) && indexMatch >= 1 ? sessions[indexMatch - 1] : undefined;
-      const target = targetByIndex ?? sessions.find((session) => session.id === resumeKey);
+      const target = targetByIndex ?? sessions.find((session) => session.id === resumeKey) ?? (await getOpenCodeSessionByIdFromDb(resumeKey));
       if (!target) {
         await safeReplyText(
           chatId,
@@ -561,11 +701,25 @@ async function processUserMessage(params: {
         return;
       }
 
+      const workdirCheck = validateExistingWorkdir(target.directory ?? "");
+      if (!workdirCheck.ok) {
+        await safeReplyText(
+          chatId,
+          `恢复失败：${workdirCheck.reason}\n未执行会话切换，请先处理目录问题后再重试。`,
+          sourceMessageId,
+          eventId,
+          senderOpenId,
+          signal
+        );
+        return;
+      }
+
       sessionByUser.set(senderOpenId, target.id);
+      workdirByUser.set(senderOpenId, workdirCheck.workdir);
       const title = target.title?.trim() ? target.title.trim() : "(无标题)";
       await safeReplyText(
         chatId,
-        `已恢复 session: ${target.id}\n标题：${title}`,
+        `已恢复 session: ${target.id}\n标题：${title}\n工作目录：${workdirCheck.workdir}`,
         sourceMessageId,
         eventId,
         senderOpenId,
@@ -626,6 +780,7 @@ async function processUserMessage(params: {
   }
 
   const previousSessionId = sessionByUser.get(senderOpenId);
+  const currentWorkdir = getCurrentWorkdir(senderOpenId);
   const currentModel = modelByUser.get(senderOpenId) ?? config.opencodeModel;
   const STREAM_FLUSH_INTERVAL_MS = 1000;
   const STREAM_MIN_DELTA_CHARS = 20;
@@ -972,12 +1127,13 @@ async function processUserMessage(params: {
 
   try {
     console.log(
-      `[opencode]: start open_id=${senderOpenId} event_id=${eventId ?? "unknown"} session=${previousSessionId ?? "new"}`
+      `[opencode]: start open_id=${senderOpenId} event_id=${eventId ?? "unknown"} session=${previousSessionId ?? "new"} workdir=${currentWorkdir}`
     );
     const result = await askOpenCode({
       message: text,
       sessionId: previousSessionId,
       model: currentModel,
+      workdir: currentWorkdir,
       timeoutMs: config.opencodeTimeoutMs,
       onEvent: onStreamEvent,
       signal

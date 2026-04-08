@@ -1,6 +1,7 @@
 import dotenv from "dotenv";
 import { randomBytes } from "node:crypto";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, statSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { z } from "zod";
 
@@ -12,6 +13,10 @@ const schema = z.object({
   ALLOWED_OPEN_ID: z.string().optional(),
   OPENCODE_MODEL: z.string().optional(),
   OPENCODE_TIMEOUT_MS: z.coerce.number().int().positive().default(300000),
+  OPENCODE_WORKDIR: z.preprocess(
+    (value) => (typeof value === "string" && value.trim().length === 0 ? undefined : value),
+    z.string().trim().min(1).default(homedir())
+  ),
   OPENCODE_SERVE_HOST: z.string().min(1).default("127.0.0.1"),
   OPENCODE_SERVE_PORT: z.coerce.number().int().min(1).max(65535).default(4096),
   OPENCODE_SERVER_PASSWORD: z.string().optional()
@@ -24,6 +29,17 @@ if (!parsed.success) {
   for (const issue of parsed.error.issues) {
     console.error(`- ${issue.path.join(".")}: ${issue.message}`);
   }
+  process.exit(1);
+}
+
+const opencodeWorkdir = parsed.data.OPENCODE_WORKDIR;
+try {
+  if (!statSync(opencodeWorkdir).isDirectory()) {
+    console.error(`环境变量校验失败:\n- OPENCODE_WORKDIR: 不是目录 (${opencodeWorkdir})`);
+    process.exit(1);
+  }
+} catch {
+  console.error(`环境变量校验失败:\n- OPENCODE_WORKDIR: 目录不存在或不可访问 (${opencodeWorkdir})`);
   process.exit(1);
 }
 
@@ -115,6 +131,7 @@ export const config = {
   allowedOpenIds,
   opencodeModel: parsed.data.OPENCODE_MODEL?.trim() || undefined,
   opencodeTimeoutMs: parsed.data.OPENCODE_TIMEOUT_MS,
+  opencodeWorkdir,
   opencodeServeHost: parsed.data.OPENCODE_SERVE_HOST,
   opencodeServePort: parsed.data.OPENCODE_SERVE_PORT,
   opencodeServerPassword

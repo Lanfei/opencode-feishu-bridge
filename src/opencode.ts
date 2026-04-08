@@ -1,6 +1,8 @@
 import { spawn } from "node:child_process";
+import { config } from "./config";
 
 const OPENCODE_ABORT_ERROR = "OPENCODE_ABORT_ERROR";
+const OPENCODE_DEFAULT_WORKDIR = config.opencodeWorkdir;
 
 function createAbortError(): Error {
   const error = new Error("OpenCode 请求已取消。") as Error & { code?: string };
@@ -111,6 +113,7 @@ export async function askOpenCode(params: {
   message: string;
   sessionId?: string;
   model?: string;
+  workdir?: string;
   timeoutMs: number;
   onTextDelta?: (text: string) => void;
   onEvent?: (event: OpenCodeEvent) => void;
@@ -127,7 +130,18 @@ export async function askOpenCode(params: {
   await initOpenCodeServe(currentServeConfig);
 
   const serveUrl = buildServeUrl(currentServeConfig);
-  const args = ["run", "--format", "json", "--attach", serveUrl, "--password", currentServeConfig.password];
+  const runWorkdir = params.workdir?.trim() || OPENCODE_DEFAULT_WORKDIR;
+  const args = [
+    "run",
+    "--format",
+    "json",
+    "--attach",
+    serveUrl,
+    "--password",
+    currentServeConfig.password,
+    "--dir",
+    runWorkdir
+  ];
 
   if (params.sessionId) {
     args.push("--session", params.sessionId);
@@ -197,27 +211,8 @@ export async function askOpenCode(params: {
   };
 }
 
-export async function listOpenCodeSessions(maxCount = 10): Promise<OpenCodeSession[]> {
-  const safeCount = Number.isFinite(maxCount) ? Math.max(1, Math.floor(maxCount)) : 10;
-  const args = ["session", "list", "--format", "json", "-n", String(safeCount)];
-  const { stdout, stderr, code, signal, timedOut } = await runCommand(args, 15000);
-
-  if (code !== 0) {
-    const stderrText = stderr.trim();
-    const stdoutText = stdout.trim();
-    const reason = [
-      `code=${String(code)}`,
-      signal ? `signal=${signal}` : "",
-      stderrText ? `stderr=${stderrText}` : "",
-      !stderrText && stdoutText ? `stdout=${stdoutText}` : ""
-    ]
-      .filter(Boolean)
-      .join(" | ");
-    const timeoutHint = timedOut ? " | 可能超时" : "";
-    throw new Error(`查询 OpenCode 会话失败: ${reason || "未知错误"}${timeoutHint}`);
-  }
-
-  const parsed = JSON.parse(stdout) as unknown;
+function parseOpenCodeSessionsFromJson(text: string): OpenCodeSession[] {
+  const parsed = JSON.parse(text) as unknown;
   if (!Array.isArray(parsed)) {
     return [];
   }
@@ -246,6 +241,84 @@ export async function listOpenCodeSessions(maxCount = 10): Promise<OpenCodeSessi
   }
 
   return sessions;
+}
+
+function escapeSqlString(value: string): string {
+  return value.replace(/'/g, "''");
+}
+
+export async function listOpenCodeSessionsFromDb(maxCount = 20): Promise<OpenCodeSession[]> {
+  const safeCount = Number.isFinite(maxCount) ? Math.max(1, Math.floor(maxCount)) : 20;
+  const query = [
+    "select",
+    "id,",
+    "title,",
+    "project_id as projectId,",
+    "directory,",
+    "time_created as created,",
+    "time_updated as updated",
+    "from session",
+    "where time_archived is null and parent_id is null",
+    "order by time_updated desc",
+    `limit ${String(safeCount)}`
+  ].join(" ");
+
+  const { stdout, stderr, code, signal, timedOut } = await runCommand(["db", query, "--format", "json"], 15000);
+  if (code !== 0) {
+    const stderrText = stderr.trim();
+    const stdoutText = stdout.trim();
+    const reason = [
+      `code=${String(code)}`,
+      signal ? `signal=${signal}` : "",
+      stderrText ? `stderr=${stderrText}` : "",
+      !stderrText && stdoutText ? `stdout=${stdoutText}` : ""
+    ]
+      .filter(Boolean)
+      .join(" | ");
+    const timeoutHint = timedOut ? " | 可能超时" : "";
+    throw new Error(`查询 OpenCode 会话失败: ${reason || "未知错误"}${timeoutHint}`);
+  }
+
+  return parseOpenCodeSessionsFromJson(stdout);
+}
+
+export async function getOpenCodeSessionByIdFromDb(sessionId: string): Promise<OpenCodeSession | undefined> {
+  const id = sessionId.trim();
+  if (!id) {
+    return undefined;
+  }
+
+  const query = [
+    "select",
+    "id,",
+    "title,",
+    "project_id as projectId,",
+    "directory,",
+    "time_created as created,",
+    "time_updated as updated",
+    "from session",
+    `where id='${escapeSqlString(id)}'`,
+    "limit 1"
+  ].join(" ");
+
+  const { stdout, stderr, code, signal, timedOut } = await runCommand(["db", query, "--format", "json"], 15000);
+  if (code !== 0) {
+    const stderrText = stderr.trim();
+    const stdoutText = stdout.trim();
+    const reason = [
+      `code=${String(code)}`,
+      signal ? `signal=${signal}` : "",
+      stderrText ? `stderr=${stderrText}` : "",
+      !stderrText && stdoutText ? `stdout=${stdoutText}` : ""
+    ]
+      .filter(Boolean)
+      .join(" | ");
+    const timeoutHint = timedOut ? " | 可能超时" : "";
+    throw new Error(`查询 OpenCode 会话失败: ${reason || "未知错误"}${timeoutHint}`);
+  }
+
+  const sessions = parseOpenCodeSessionsFromJson(stdout);
+  return sessions[0];
 }
 
 export async function listOpenCodeModels(): Promise<OpenCodeModel[]> {
@@ -461,7 +534,7 @@ async function startServeProcess(config: ServeConfig): Promise<void> {
   ];
 
   const child = spawn("opencode", args, {
-    cwd: process.cwd(),
+    cwd: OPENCODE_DEFAULT_WORKDIR,
     env: {
       ...process.env,
       OPENCODE_SERVER_PASSWORD: config.password
@@ -518,7 +591,18 @@ async function waitForServeReady(config: ServeConfig): Promise<void> {
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const probe = await runCommand(
-      ["run", "--format", "json", "--attach", serveUrl, "--password", config.password, "ping"],
+      [
+        "run",
+        "--format",
+        "json",
+        "--attach",
+        serveUrl,
+        "--password",
+        config.password,
+        "--dir",
+        OPENCODE_DEFAULT_WORKDIR,
+        "ping"
+      ],
       8000,
       config.password
     );
@@ -541,11 +625,12 @@ function sleep(ms: number): Promise<void> {
 async function runCommand(
   args: string[],
   timeoutMs: number,
-  password?: string
+  password?: string,
+  workingDirectory?: string
 ): Promise<{ stdout: string; stderr: string; code: number | null; signal: NodeJS.Signals | null; timedOut: boolean }> {
   return await new Promise((resolve, reject) => {
     const child = spawn("opencode", args, {
-      cwd: process.cwd(),
+      cwd: workingDirectory ?? OPENCODE_DEFAULT_WORKDIR,
       env: {
         ...process.env,
         ...(password ? { OPENCODE_SERVER_PASSWORD: password } : {})
@@ -605,7 +690,7 @@ async function runCommandStreaming(
 }> {
   return await new Promise((resolve, reject) => {
     const child = spawn("opencode", args, {
-      cwd: process.cwd(),
+      cwd: OPENCODE_DEFAULT_WORKDIR,
       env: {
         ...process.env,
         OPENCODE_SERVER_PASSWORD: password

@@ -17,6 +17,7 @@ npm install
 - `ALLOWED_OPEN_ID`: 已授权用户的 open_id 列表（逗号分隔，用户验证成功后会自动写入）
 - `OPENCODE_MODEL`: 可选，指定模型（如 `openai/gpt-5.3-codex`）
 - `OPENCODE_TIMEOUT_MS`: 可选，OpenCode 超时时间（默认 `300000`）
+- `OPENCODE_WORKDIR`: 可选，OpenCode 新会话的默认工作目录（默认用户根目录）
 - `OPENCODE_SERVE_HOST`: OpenCode serve 绑定地址（默认 `127.0.0.1`）
 - `OPENCODE_SERVE_PORT`: OpenCode serve 端口（默认 `4096`）
 - `OPENCODE_SERVER_PASSWORD`: OpenCode serve 密码（可留空，进程启动时会自动生成随机值）
@@ -41,7 +42,7 @@ npm start
 1. 未授权用户发送任意消息后，服务会在日志打印该用户的临时 token（10 分钟有效）。
 2. 用户向机器人发送该 token（需完全匹配）后，当前 `open_id` 会自动写入 `.env` 的 `ALLOWED_OPEN_ID`。
 3. 完成授权后发送消息，机器人会返回 OpenCode 的回答。
-4. 如需清空上下文，发送 `/reset` 或 `/new`。
+4. 如需清空上下文，发送 `/reset` 或 `/new`；如需新会话切到指定目录，发送 `/new <工作目录>`。
 5. 如需停止当前任务并清空当前用户队列，发送 `/stop`。
 6. 如需查看可恢复会话，发送 `/resume`；如需切换到某个会话，发送 `/resume <编号|session_id>`。
 7. 如需查看已配置 provider 的可用模型，发送 `/models`。
