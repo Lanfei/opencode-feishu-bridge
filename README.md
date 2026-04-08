@@ -1,71 +1,39 @@
 # opencode-feishu-bridge
 
-飞书长连接单人机器人：基于 open_id 白名单接入，未授权用户通过临时 token 完成绑定。
+`opencode-feishu-bridge` 是一个连接飞书与 OpenCode 的轻量级桥接服务。它通过飞书长连接接收消息，转发给 OpenCode 处理，并将结果回传到会话中。
 
-## 1. 安装依赖
+## 运行方式
 
-```bash
-npm install
-```
-
-## 2. 配置文件
-
-复制 `config.example.json` 到 `~/.config/opencode/feishu-bridge/config.json` 并填写：
+方式一：全局安装
 
 ```bash
-mkdir -p ~/.config/opencode/feishu-bridge
-cp config.example.json ~/.config/opencode/feishu-bridge/config.json
+npm i -g opencode-feishu-bridge
 ```
 
-如果该配置文件不存在，首次启动会进入命令行交互并自动创建。
-
-- `feishuAppId`: 飞书应用 App ID
-- `feishuAppSecret`: 飞书应用 App Secret
-- `allowedOpenId`: 已授权用户的 open_id 列表，支持 JSON 数组或逗号分隔字符串
-- `opencodeModel`: 可选，指定模型（如 `openai/gpt-5.3-codex`）
-- `opencodeTimeout`: 可选，OpenCode 超时时间（单位毫秒，默认 `300000`）
-- `opencodeWorkdir`: 可选，OpenCode 新会话的默认工作目录（默认用户根目录）
-- `opencodeServeHost`: OpenCode serve 绑定地址（默认 `127.0.0.1`）
-- `opencodeServePort`: OpenCode serve 端口（默认 `4096`）
-
-## 3. 运行方式
-
-开发模式（热启动，直接跑 TS）：
-
-```bash
-npm run dev
-```
-
-生产模式（先编译再启动）：
-
-```bash
-npm run build
-npm start
-```
-
-连接到本地 OpenCode Serve：
-
-```bash
-npm run attach
-```
-
-自定义 URL：
-
-```bash
-npm run attach -- http://127.0.0.1:5000
-```
-
-也可以作为 bin 使用：
-
-```bash
-ofbc
-ofbc http://127.0.0.1:5000
-```
-
-启动服务也可以使用 bin：
+启动服务：
 
 ```bash
 ofbs
+```
+
+启动 OpenCode 并连接到服务：
+
+```bash
+# ofbc <url>
+ofbc
+```
+
+方式二：直接使用 npx（无需安装）
+
+```bash
+npx --package opencode-feishu-bridge ofbs
+```
+
+启动 OpenCode 并连接到服务：
+
+```bash
+# npx --package opencode-feishu-bridge ofbc <url>
+npx --package opencode-feishu-bridge ofbc
 ```
 
 看到 `飞书长连接已启动，等待消息...` 后：
@@ -79,15 +47,9 @@ ofbs
 7. 如需查看已配置 provider 的可用模型，发送 `/models`。
 8. 如需查看当前会话最近使用模型，发送 `/model`；如需切换模型，发送 `/model <model_id>`。
 
-## 4. 飞书后台最小配置
+## 飞书后台最小配置
 
 - 启用机器人能力
 - 开启事件订阅（长连接模式）
 - 订阅 `接收消息 v2.0`（`im.message.receive_v1`）和 `消息撤回事件`（`im.message.recalled_v1`）
 - 授权机器人可读取并发送消息
-
-## 5. 说明
-
-- 当前通过 `opencode serve` 常驻服务 + `opencode run --attach` 处理消息。
-- 当前按飞书用户 `open_id` 在内存里维护 `session_id`，用于保持上下文。
-- 进程重启后会话映射会丢失，属于预期行为；若需要持久化可接 SQLite/Redis。
