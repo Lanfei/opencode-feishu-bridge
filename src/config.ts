@@ -1,8 +1,7 @@
 import dotenv from "dotenv";
 import { randomBytes } from "node:crypto";
-import { readFileSync, statSync, writeFileSync } from "node:fs";
+import { statSync } from "node:fs";
 import { homedir } from "node:os";
-import { resolve } from "node:path";
 import { z } from "zod";
 
 dotenv.config();
@@ -50,6 +49,10 @@ const allowedOpenIds = new Set(
     .filter(Boolean)
 );
 
+if (allowedOpenIds.size === 0) {
+  console.warn("[config]: ALLOWED_OPEN_ID 为空，当前允许所有 open_id 接入。请注意安全风险。");
+}
+
 const opencodeTimeoutMs = parsed.data.OPENCODE_TIMEOUT * 1000;
 
 const opencodeServerPassword =
@@ -58,74 +61,10 @@ const opencodeServerPassword =
     : randomBytes(18).toString("hex");
 
 if (!parsed.data.OPENCODE_SERVER_PASSWORD || parsed.data.OPENCODE_SERVER_PASSWORD.trim().length === 0) {
-  console.warn(`OPENCODE_SERVER_PASSWORD 为空，已使用随机字符串作为当前进程密码: ${opencodeServerPassword}`);
+  console.warn(`[config]: OPENCODE_SERVER_PASSWORD 为空，已使用随机字符串作为当前进程密码: ${opencodeServerPassword}`);
 }
 
 process.env.OPENCODE_SERVER_PASSWORD = opencodeServerPassword;
-
-function updateEnvValue(content: string, key: string, value: string): string {
-  const pattern = new RegExp(`^${key}=.*$`, "m");
-  if (pattern.test(content)) {
-    return content.replace(pattern, `${key}=${value}`);
-  }
-
-  const normalized = content.length > 0 && !content.endsWith("\n") ? `${content}\n` : content;
-  return `${normalized}${key}=${value}\n`;
-}
-
-function readEnvContent(): string {
-  const envPath = resolve(process.cwd(), ".env");
-  try {
-    return readFileSync(envPath, "utf8");
-  } catch {
-    return "";
-  }
-}
-
-function writeEnvContent(content: string): void {
-  const envPath = resolve(process.cwd(), ".env");
-  writeFileSync(envPath, content, "utf8");
-}
-
-function parseAllowedOpenIdsFromEnv(content: string): string[] {
-  const match = content.match(/^ALLOWED_OPEN_ID=(.*)$/m);
-  if (!match) {
-    return [];
-  }
-
-  return (match[1] ?? "")
-    .split(",")
-    .map((item) => item.trim())
-    .filter(Boolean);
-}
-
-export function persistAllowedOpenId(openId: string): void {
-  const cleanOpenId = openId.trim();
-  if (!cleanOpenId) {
-    return;
-  }
-
-  const maxAttempts = 3;
-
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const envContent = readEnvContent();
-    const diskIds = parseAllowedOpenIdsFromEnv(envContent);
-    const mergedSet = new Set([...allowedOpenIds, ...diskIds, cleanOpenId]);
-    const merged = Array.from(mergedSet).join(",");
-    const nextContent = updateEnvValue(envContent, "ALLOWED_OPEN_ID", merged);
-    writeEnvContent(nextContent);
-
-    const verifyIds = new Set(parseAllowedOpenIdsFromEnv(readEnvContent()));
-    if (verifyIds.has(cleanOpenId)) {
-      for (const id of verifyIds) {
-        allowedOpenIds.add(id);
-      }
-      return;
-    }
-  }
-
-  throw new Error(`写入 ALLOWED_OPEN_ID 失败：重试 ${String(maxAttempts)} 次后未校验通过`);
-}
 
 export const config = {
   appId: parsed.data.FEISHU_APP_ID,

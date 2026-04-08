@@ -1,9 +1,8 @@
 import * as Lark from "@larksuiteoapi/node-sdk";
-import { randomBytes } from "node:crypto";
 import { existsSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, resolve } from "node:path";
-import { config, persistAllowedOpenId } from "./config";
+import { config } from "./config";
 import {
   askOpenCode,
   getOpenCodeSessionByIdFromDb,
@@ -30,10 +29,10 @@ const wsClient = new Lark.WSClient({
 
 const handledEvents = new Map<string, number>();
 const allowedOpenIds = new Set(config.allowedOpenIds);
+const allowAllOpenIds = allowedOpenIds.size === 0;
 const sessionByUser = new Map<string, string>();
 const modelByUser = new Map<string, string>();
 const workdirByUser = new Map<string, string>();
-const pendingTokens = new Map<string, { token: string; expiresAt: number }>();
 let isOpenCodeReady = false;
 let opencodeReadyPromise: Promise<void> | undefined;
 type UserQueueTask = (signal: AbortSignal) => Promise<void>;
@@ -52,7 +51,6 @@ type UserQueueState = {
 
 const userMessageQueues = new Map<string, UserQueueState>();
 const DEDUPE_TTL_MS = 10 * 60 * 1000;
-const TOKEN_TTL_MS = 10 * 60 * 1000;
 const RESET_COMMAND = "/reset";
 const NEW_COMMAND = "/new";
 const STOP_COMMAND = "/stop";
@@ -191,14 +189,6 @@ function cleanupHandledEvents(now: number): void {
   for (const [eventId, timestamp] of handledEvents.entries()) {
     if (now - timestamp > DEDUPE_TTL_MS) {
       handledEvents.delete(eventId);
-    }
-  }
-}
-
-function cleanupExpiredPendingTokens(now: number): void {
-  for (const [openId, pending] of pendingTokens.entries()) {
-    if (pending.expiresAt <= now) {
-      pendingTokens.delete(openId);
     }
   }
 }
@@ -368,27 +358,6 @@ function splitLinesByLength(lines: string[], maxChars: number): string[] {
   }
 
   return chunks;
-}
-
-function generateTempToken(): string {
-  return randomBytes(16).toString("hex");
-}
-
-function getOrCreatePendingToken(openId: string): { token: string; expiresAt: number } {
-  const current = pendingTokens.get(openId);
-  const now = Date.now();
-
-  if (current && current.expiresAt > now) {
-    return current;
-  }
-
-  const created = {
-    token: generateTempToken(),
-    expiresAt: now + TOKEN_TTL_MS
-  };
-
-  pendingTokens.set(openId, created);
-  return created;
 }
 
 function buildMarkdownContent(text: string): string {
@@ -1206,7 +1175,6 @@ const eventDispatcher = new Lark.EventDispatcher({}).register({
     const eventId = data.event_id;
     const now = Date.now();
     cleanupHandledEvents(now);
-    cleanupExpiredPendingTokens(now);
 
     if (eventId && handledEvents.has(eventId)) {
       console.log(`[feishu]: skip duplicated event_id=${eventId}`);
@@ -1249,42 +1217,10 @@ const eventDispatcher = new Lark.EventDispatcher({}).register({
       return;
     }
 
-    if (!allowedOpenIds.has(senderOpenId)) {
-      const pending = getOrCreatePendingToken(senderOpenId);
-
-      if (text === pending.token) {
-        pendingTokens.delete(senderOpenId);
-        allowedOpenIds.add(senderOpenId);
-        try {
-          persistAllowedOpenId(senderOpenId);
-          await safeReplyText(
-            chatId,
-            `鉴权成功，已将 open_id 加入 .env：${senderOpenId}`,
-            sourceMessageId,
-            eventId,
-            senderOpenId
-          );
-        } catch (error) {
-          await safeReplyText(
-            chatId,
-            `鉴权成功，但写入 .env 失败。你的 open_id：${senderOpenId}，请手动加入 ALLOWED_OPEN_ID。`,
-            sourceMessageId,
-            eventId,
-            senderOpenId
-          );
-          console.error("写入 ALLOWED_OPEN_ID 失败:", error);
-        }
-        return;
-      }
-
-      const remainingSeconds = Math.max(1, Math.floor((pending.expiresAt - Date.now()) / 1000));
-      console.log(
-        `[feishu]: auth open_id=${senderOpenId} 临时token=${pending.token} 有效期=${remainingSeconds}s`
-      );
-
+    if (!allowAllOpenIds && !allowedOpenIds.has(senderOpenId)) {
       await safeReplyText(
         chatId,
-        `当前用户未授权。你的 open_id：${senderOpenId}。\n请联系管理员查看服务日志中的临时 token，并在10分钟内回发该 token 完成验证。`,
+        `当前用户未授权。你的 open_id：${senderOpenId}。请联系管理员将该 open_id 加入 ALLOWED_OPEN_ID。`,
         sourceMessageId,
         eventId,
         senderOpenId
@@ -1312,7 +1248,7 @@ const eventDispatcher = new Lark.EventDispatcher({}).register({
 
 async function bootstrap(): Promise<void> {
   await wsClient.start({ eventDispatcher });
-  console.log("飞书长连接已启动，等待消息...");
+  console.log("[bootstrap]: 飞书长连接已启动，等待消息...");
 
   opencodeReadyPromise = initOpenCodeServe({
     hostname: config.opencodeServeHost,
@@ -1322,7 +1258,7 @@ async function bootstrap(): Promise<void> {
   await opencodeReadyPromise;
   isOpenCodeReady = true;
 
-  console.log("OpenCode 已就绪，开始处理队列与新消息...");
+  console.log("[bootstrap]: OpenCode 已就绪，开始处理队列与新消息...");
 }
 
 bootstrap().catch((error) => {
