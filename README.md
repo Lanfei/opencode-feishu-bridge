@@ -16,7 +16,7 @@ npm i -g opencode-feishu-bridge
 ofbs
 ```
 
-启动 OpenCode 并连接到服务：
+将 OpenCode attach 到服务：
 
 ```bash
 # ofbc <url>
@@ -29,7 +29,7 @@ ofbc
 npx --package opencode-feishu-bridge ofbs
 ```
 
-启动 OpenCode 并连接到服务：
+将 OpenCode attach 到服务：
 
 ```bash
 # npx --package opencode-feishu-bridge ofbc <url>
@@ -41,11 +41,11 @@ npx --package opencode-feishu-bridge ofbc
 1. 配置 `allowedOpenId` 后，只有白名单内的用户可以使用机器人；未授权用户会收到提示。
 2. 若 `allowedOpenId` 为空，则允许所有用户接入（启动时会打印安全告警日志）。
 3. 发送消息后，机器人会返回 OpenCode 的回答。
-4. 如需清空上下文，发送 `/reset` 或 `/new`；如需新会话切到指定目录，发送 `/new <工作目录>`。
-5. 如需停止当前任务并清空当前用户队列，发送 `/stop`。
-6. 如需查看可恢复会话，发送 `/session`；如需切换到某个会话，发送 `/session <编号|session_id>`。
-7. 如需查看已配置 provider 的可用模型，发送 `/models`。
-8. 如需查看当前会话最近使用模型，发送 `/model`；如需切换模型，发送 `/model <model_id>`。
+4. 如需清空当前聊天上下文，发送 `/reset` 或 `/new`；如需新会话切到指定目录，发送 `/new <工作目录>`。
+5. 如需停止当前聊天任务并清空当前聊天队列，发送 `/stop`。
+6. 如需查看可恢复会话，发送 `/session`；如需切换当前聊天到某个会话，发送 `/session <编号|session_id>`。
+7. 如需查看当前可用模型，发送 `/models`。
+8. `/model` 用于当前聊天模型设置：发送 `/model` 可查看当前聊天最近使用或已选择的模型；发送 `/model <model_id>` 可切换当前聊天模型。
 
 ## 飞书后台最小配置
 
